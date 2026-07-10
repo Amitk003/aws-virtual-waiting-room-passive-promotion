@@ -9,6 +9,7 @@ const TABLE_NAME = process.env.TABLE_NAME!;
 const SIGNING_SECRET_ID = process.env.SIGNING_SECRET_ID!;
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const JWT_EXPIRY_SECONDS = 3600; // 1 hour
+const QUEUE_TTL_SECONDS = 86400; // 24 hours — data persists beyond JWT expiry
 
 function validateFanId(fanId: string): boolean {
   return /^[a-zA-Z0-9_-]{1,64}$/.test(fanId);
@@ -44,7 +45,8 @@ export async function handler(
     // Get precise timestamp via system clock
     const entryTimestamp = Date.now();
     const nowSeconds = Math.floor(entryTimestamp / 1000);
-    const expirySeconds = nowSeconds + JWT_EXPIRY_SECONDS;
+    const jwtExpiry = nowSeconds + JWT_EXPIRY_SECONDS;
+    const queueTtl = nowSeconds + QUEUE_TTL_SECONDS;
 
     // Atomically write tracking item + QueueTicket via transaction.
     // If the tracking item already exists, the entire transaction fails
@@ -64,7 +66,7 @@ export async function handler(
                 PK: { S: trackingPk },
                 SK: { S: 'PENDING' },
                 FanId: { S: fanId },
-                ExpiresAt: { N: String(expirySeconds) },
+                ExpiresAt: { N: String(queueTtl) },
               },
               ConditionExpression: 'attribute_not_exists(PK)',
             },
@@ -78,7 +80,7 @@ export async function handler(
                 FanId: { S: fanId },
                 EntryTimestamp: { N: String(entryTimestamp) },
                 ShardId: { N: String(shardId) },
-                ExpiresAt: { N: String(expirySeconds) },
+                ExpiresAt: { N: String(queueTtl) },
               },
             },
           },
@@ -104,7 +106,7 @@ export async function handler(
       entryTimestamp,
       shardId,
       iat: nowSeconds,
-      exp: expirySeconds,
+      exp: jwtExpiry,
     };
 
     const token = await signJwt(jwtPayload, SIGNING_SECRET_ID);
