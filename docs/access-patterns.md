@@ -82,13 +82,6 @@ This document lists all database operations the system needs. Each pattern was t
 - **SK**: begins_with `BUCKET#`
 - **Purpose**: Returns all DensityBucket items for an event. Density items are sharded across 20 partitions to avoid the 1000 WCU ceiling. The read path queries all 20 shards in parallel and merges the results in memory. Each item has a `Count` attribute representing the number of users who joined in that 1-second bucket. The total queue position for a user at timestamp T is the sum of all Count values for buckets before T. With at most 3600 items total, 20 small queries are still fast enough to serve at the edge.
 
-- **Operation**: Query GSI + UpdateItem
-- **Target**: GSI + Table
-- **Frequency**: Every 5 minutes
-- **Step 1**: Query `SessionMetadataIndex` at `GSIPK = EVENT#<Id>#SESSION_META`, count results
-- **Step 2**: UpdateItem on GlobalState to set `ActivePurchaserCount` to the actual count
-- **Purpose**: Corrects any counter drift from missed TTL events or duplicate stream processing.
-
 ## Access Pattern Summary
 
 | # | Pattern | Operation | Frequency |

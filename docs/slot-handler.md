@@ -47,19 +47,23 @@ Authorization: Bearer <JWT>
 
 1. User is admitted (from status polling) and wants to enter checkout
 2. Client calls POST /claim with the JWT
-3. Lambda creates a SessionItem (PK = `EVENT#<id>#SESSION#<fanId>`, SK = `SESSION`)
-4. Lambda atomically increments ActivePurchaserCount with condition < 1000
-5. If counter at 1000, rolls back (deletes SessionItem) and returns 429
-6. Session has a 5-minute TTL for auto-cleanup on abandon
-7. User calls POST /release when checkout completes
-8. Lambda deletes SessionItem and decrements ActivePurchaserCount
+3. Lambda reads `AdmittedUntilTimestamp` and `TieBreakerThreshold` from GlobalState
+4. If `entryTimestamp > admittedUntilTimestamp` or tie-breaker fails, returns 403
+5. Lambda executes a single `TransactWriteItems`:
+   - Creates a SessionItem (PK = `EVENT#<id>#SESSION#<fanId>`, SK = `SESSION`)
+   - Increments `ActivePurchaserCount` with condition `ActivePurchaserCount < 1000`
+6. If counter at 1000, the transaction fails atomically — no session created, no rollback needed
+7. Session has a 5-minute TTL for auto-cleanup on abandon
+8. User calls POST /release when checkout completes
+9. Lambda conditionally deletes SessionItem (`attribute_exists(PK)`) then decrements counter
 
 ## Reconciliation
 
 The reconciliation Lambda runs every 5 minutes via EventBridge. It queries
-the SessionMetadataIndex GSI to count actual active sessions and corrects
-ActivePurchaserCount on GlobalState. This handles edge cases like missed
-TTL events or duplicate stream processing.
+the SessionMetadataIndex GSI (with ExpiresAt projection), filters expired
+sessions in memory, deletes expired items inline, and sets ActivePurchaserCount
+to the actual valid session count. This handles counter drift without relying
+on TTL stream events.
 
 ## Project structure
 

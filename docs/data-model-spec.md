@@ -43,8 +43,7 @@ A single item that tracks the overall queue state.
 | SK | String | `METADATA` | Fixed sort key |
 | AdmittedUntilTimestamp | Number | `1719997202000` | Users before this time can enter |
 | ActivePurchaserCount | Number | `950` | How many users are currently buying |
-| TotalQueued | Number | `2500000` | Total users in queue |
-| TimeDensityMap | String | JSON array | Count of users per second bucket |
+| TieBreakerThreshold | Number | `100` | Fraction (0-100) for partial-second tie-breaking |
 
 **Purpose**: This is the "watermark" item. It tells the system how far the admission window has moved. Users check their timestamp against `AdmittedUntilTimestamp` to know if they can enter.
 
@@ -64,10 +63,10 @@ Shard-level pre-aggregation reduces GlobalState updates from millions to ~2000/s
 `ADD Count :inc` are safe across concurrent aggregator instances. A JSON string
 on GlobalState would require read-modify-write and risk race conditions.
 
-**Sharded PK**: The PK is sharded across 20 partitions (`#SHARD#<1-20>`) using
-`bucketTimestamp % 20 + 1`. This scatters writes evenly and keeps each partition
-well below the 1000 WCU cap. The read path queries all 20 shards in parallel and
-merges the results in memory.
+**PK**: A single partition key `EVENT#<EventId>#DENSITY` is used instead of
+sharding. The stream aggregator pre-aggregates counts in memory per batch
+before writing, so the write rate to this partition stays well below 1000 WCU.
+The read path issues a single Query, eliminating read amplification.
 
 **Pruning**: After `AdmittedUntilTimestamp` advances past a bucket, the bucket
 data is no longer needed. A periodic task can delete old DensityBucket items.
@@ -89,10 +88,10 @@ Represents one user's active checkout session. Created dynamically when a user e
 
 ## Density Map
 
-The old TimeDensityMap was a JSON array on the GlobalState item. In this design,
-it is replaced by individual DensityBucket items (one per 1-second bucket).
-The read path queries all DensityBucket items for the event to build the density
-map. With at most 3600 items for a typical event, this is fast and cost-effective.
+The density map is stored as individual DensityBucket items (one per 1-second
+bucket). The read path issues a single Query on `PK = EVENT#<Id>#DENSITY` with
+`SK begins_with BUCKET#` to retrieve all buckets. With at most 3600 items for a
+typical event, this is fast and cost-effective.
 
 ### Stream Aggregator Flow
 

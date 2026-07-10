@@ -54,11 +54,12 @@ The JWT is obtained from the ingestion endpoint (POST /join).
 
 1. User sends their JWT in the Authorization header
 2. Lambda verifies the JWT locally using the cached public key from Secrets Manager
-3. Reads GlobalState (GetItem) for the event's AdmittedUntilTimestamp
-4. If admitted (entryTimestamp <= admittedUntilTimestamp), returns immediately
-5. If waiting, queries all 20 DensityBucket shards in parallel and merges counts
-6. Calculates queue position = sum of counts in all buckets before user's timestamp
-7. Estimates wait time based on queue position and ActivePurchaserCount
+3. Reads GlobalState (GetItem) for the event's `AdmittedUntilTimestamp` and `TieBreakerThreshold`
+4. Admission check uses tie-breaking: `hash(fanId) % 100 < TieBreakerThreshold` when entryTimestamp equals the watermark
+5. If admitted, returns immediately with `admitted: true`
+6. If waiting, queries the single DensityBucket PK (1 Query, not 20 parallel) for all per-second bucket counts
+7. Calculates queue position = sum of counts in all buckets before user's timestamp
+8. Estimates wait time based on queue position and ActivePurchaserCount
 
 ## CloudFront CDN
 
