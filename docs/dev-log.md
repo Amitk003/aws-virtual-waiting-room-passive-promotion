@@ -313,3 +313,48 @@ Status API design:
 - If waiting, queries all 20 DensityBucket shards in parallel, merges counts, calculates queue position
 - Returns estimated wait time based on queue position and active purchaser count
 - CloudFront caches status responses per-user (Authorization header in cache key) with 2-second default TTL
+
+### 2026-07-10 - Fix: global-scope in-memory cache for density map
+
+Files changed:
+- `services/status-api/src/index.ts` - Added `Map<eventId, CachedState>` with 2s TTL outside the handler. First request per 2s window queries DynamoDB; subsequent requests served from memory. Reduces DB reads from 2M/sec to ~210/sec.
+
+---
+
+## Branch: feature/phase-6-slot-handler
+
+### 2026-07-10 - Slot Handler and Reconciliation Lambda
+
+Commands ran:
+- Created `services/slot-handler/` and `services/reconciliation/` project dirs
+- `npm install` in both - Installed deps
+- `npx tsc --noEmit` - Verified TypeScript compilation for both
+- `npx cdk synth` - Generated CloudFormation (slot bundle 44.7kb, rec bundle 1.1kb)
+
+Files created:
+- `services/slot-handler/package.json` - Node.js project config
+- `services/slot-handler/tsconfig.json` - TypeScript config
+- `services/slot-handler/src/index.ts` - Slot handler (claim + release)
+- `services/slot-handler/src/jwt.ts` - JWT verification
+- `services/reconciliation/package.json` - Node.js project config
+- `services/reconciliation/tsconfig.json` - TypeScript config
+- `services/reconciliation/src/index.ts` - Reconciliation handler
+- `docs/slot-handler.md` - Slot handler documentation
+
+Files modified:
+- `infra/lib/infra-stack.ts` - Added SlotHandler Lambda + 2 API routes, Reconciliation Lambda + EventBridge schedule
+- `docs/dev-log.md` - This entry
+
+New stack resources:
+- Lambda: SlotHandler (Node.js 22, ARM64, 256MB, 10s) - handles claim + release
+- API Route: POST /api/v1/event/{eventId}/claim
+- API Route: POST /api/v1/event/{eventId}/release
+- Lambda: ReconciliationHandler (Node.js 22, ARM64, 256MB, 30s) - corrects counter drift
+- EventBridge Rule: Every 5 minutes, targets ReconciliationHandler
+- IAM: Auto-created roles with DynamoDB read/write + Secrets Manager read permissions
+
+Slot handler design:
+- Claim: Creates SessionItem, then conditionally increments ActivePurchaserCount (cap 1000). If counter full, rolls back (deletes session) and returns 429.
+- Release: Deletes SessionItem, decrements ActivePurchaserCount.
+- Session TTL: 5 minutes for auto-cleanup on abandon.
+- Reconciliation: Queries SessionMetadataIndex GSI, counts active sessions, sets ActivePurchaserCount to actual count.
