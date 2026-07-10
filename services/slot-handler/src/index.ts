@@ -111,27 +111,44 @@ export async function handler(
     }
 
     if (method === 'POST' && event.rawPath.includes('/release')) {
-      // Delete session item
-      await ddb.send(new DeleteItemCommand({
-        TableName: TABLE_NAME,
-        Key: {
-          PK: { S: sessionPk },
-          SK: { S: 'SESSION' },
-        },
-      }));
+      // Conditional delete: only succeed if the session item exists.
+      // Prevents double-decrement from:
+      // 1. Duplicate /release requests (delete succeeds twice)
+      // 2. TTL expiry race (TTL deletes item + aggregator decrements,
+      //    then stale client /release decrements again)
+      try {
+        await ddb.send(new DeleteItemCommand({
+          TableName: TABLE_NAME,
+          Key: {
+            PK: { S: sessionPk },
+            SK: { S: 'SESSION' },
+          },
+          ConditionExpression: 'attribute_exists(PK)',
+        }));
 
-      // Decrement counter
-      await ddb.send(new UpdateItemCommand({
-        TableName: TABLE_NAME,
-        Key: {
-          PK: { S: `EVENT#${eventId}#METADATA` },
-          SK: { S: 'METADATA' },
-        },
-        UpdateExpression: 'ADD ActivePurchaserCount :negOne',
-        ExpressionAttributeValues: {
-          ':negOne': { N: '-1' },
-        },
-      }));
+        // Only decrement if the item was actually deleted
+        await ddb.send(new UpdateItemCommand({
+          TableName: TABLE_NAME,
+          Key: {
+            PK: { S: `EVENT#${eventId}#METADATA` },
+            SK: { S: 'METADATA' },
+          },
+          UpdateExpression: 'ADD ActivePurchaserCount :negOne',
+          ExpressionAttributeValues: {
+            ':negOne': { N: '-1' },
+          },
+        }));
+      } catch (err: any) {
+        if (err.name === 'ConditionalCheckFailedException') {
+          // Session already deleted (completed, released, or TTL-expired)
+          return {
+            statusCode: 200,
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ sessionReleased: true, fanId }),
+          };
+        }
+        throw err;
+      }
 
       return {
         statusCode: 200,
