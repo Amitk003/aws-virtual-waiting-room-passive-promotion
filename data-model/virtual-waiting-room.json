@@ -128,7 +128,7 @@
             "ExpiresAt": { "N": "1720083630" }
           },
           {
-            "PK": { "S": "EVENT#match2026#TRACKING#fan_11223" },
+            "PK": { "S": "EVENT#match2026#FAN#fan_11223" },
             "SK": { "S": "PENDING" },
             "FanId": { "S": "fan_11223" },
             "ExpiresAt": { "N": "1720083605" }

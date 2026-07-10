@@ -1,4 +1,4 @@
-import { DynamoDBClient, PutItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, TransactWriteItemsCommand } from '@aws-sdk/client-dynamodb';
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getShardId } from './shard.js';
 import { signJwt, JwtPayload } from './jwt.js';
@@ -31,40 +31,57 @@ export async function handler(
     const nowSeconds = Math.floor(entryTimestamp / 1000);
     const expirySeconds = nowSeconds + JWT_EXPIRY_SECONDS;
 
-    // Write tracking item to prevent double-join
-    // If Lambda crashes between this write and the QueueTicket write,
-    // TTL auto-cleans the orphaned tracking item
-    const trackingPk = `EVENT#${eventId}#FAN#${fanId}`;
-
-    await ddb.send(new PutItemCommand({
-      TableName: TABLE_NAME,
-      Item: {
-        PK: { S: trackingPk },
-        SK: { S: 'PENDING' },
-        FanId: { S: fanId },
-        ExpiresAt: { N: String(expirySeconds) },
-      },
-      ConditionExpression: 'attribute_not_exists(PK)',
-    }));
-
-    // Generate random shard for write distribution
+    // Atomically write tracking item + QueueTicket via transaction.
+    // If the tracking item already exists, the entire transaction fails
+    // and the user gets a 409 — no partial state, no orphaned items.
     const shardId = getShardId();
-
-    // Write QueueTicket to DynamoDB
+    const trackingPk = `EVENT#${eventId}#FAN#${fanId}`;
     const queuePk = `EVENT#${eventId}#SHARD#${shardId}`;
     const queueSk = `TS#${entryTimestamp}#FAN#${fanId}`;
 
-    await ddb.send(new PutItemCommand({
-      TableName: TABLE_NAME,
-      Item: {
-        PK: { S: queuePk },
-        SK: { S: queueSk },
-        FanId: { S: fanId },
-        EntryTimestamp: { N: String(entryTimestamp) },
-        ShardId: { N: String(shardId) },
-        ExpiresAt: { N: String(expirySeconds) },
-      },
-    }));
+    try {
+      await ddb.send(new TransactWriteItemsCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: TABLE_NAME,
+              Item: {
+                PK: { S: trackingPk },
+                SK: { S: 'PENDING' },
+                FanId: { S: fanId },
+                ExpiresAt: { N: String(expirySeconds) },
+              },
+              ConditionExpression: 'attribute_not_exists(PK)',
+            },
+          },
+          {
+            Put: {
+              TableName: TABLE_NAME,
+              Item: {
+                PK: { S: queuePk },
+                SK: { S: queueSk },
+                FanId: { S: fanId },
+                EntryTimestamp: { N: String(entryTimestamp) },
+                ShardId: { N: String(shardId) },
+                ExpiresAt: { N: String(expirySeconds) },
+              },
+            },
+          },
+        ],
+      }));
+    } catch (err: any) {
+      if (err.name === 'TransactionCanceledException') {
+        const reasons = err.CancellationReasons || [];
+        if (reasons[0]?.Code === 'ConditionalCheckFailed') {
+          return {
+            statusCode: 409,
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ error: 'User already in queue' }),
+          };
+        }
+      }
+      throw err;
+    }
 
     // Sign JWT locally using cached ECC key
     const jwtPayload: JwtPayload = {
@@ -89,14 +106,6 @@ export async function handler(
     };
   } catch (error: any) {
     console.error('Ingestion error:', error);
-
-    if (error.name === 'ConditionalCheckFailedException') {
-      return {
-        statusCode: 409,
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ error: 'User already in queue' }),
-      };
-    }
 
     return {
       statusCode: 500,

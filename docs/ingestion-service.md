@@ -48,7 +48,7 @@ POST /api/v1/event/{eventId}/join
 1. User sends their fan ID
 2. Lambda writes a tracking item (PK = `EVENT#<id>#FAN#<fanId>`) to prevent double-join
 3. If tracking item write fails (user already exists), returns 409
-4. Lambda gets the current time (microsecond precision via AWS Time Sync)
+4. Lambda gets the current time via Date.now() (system clock)
 5. A random shard ID (1-2000) is generated to spread writes across DynamoDB partitions
 6. A QueueTicket item is written to DynamoDB with sharded PK
 7. A JWT is signed locally using the ECC P-256 key (cached in memory from Secrets Manager)
@@ -56,7 +56,7 @@ POST /api/v1/event/{eventId}/join
 
 ## Key design points
 
-**Double-join prevention**: A tracking item is written first with PK = `EVENT#<eventId>#FAN#<fanId>`. If the user already has a tracking item, the write fails and they get a 409 response. The tracking item has an ExpiresAt TTL so orphaned items (from Lambda crashes between the two writes) auto-expire.
+**Double-join prevention**: A TransactWriteItems atomically writes both the tracking item and QueueTicket. If the tracking item already exists (condition check fails), the entire transaction is cancelled and the user gets a 409 response. There is no partial state — either both items are written, or neither is.
 
 **Shard distribution**: The QueueTicket partition key uses a random shard suffix (`SHARD#<1-2000>`). This spreads 1M writes/second evenly across DynamoDB partitions (500 writes/sec per partition, well below the 1000 WCU limit).
 
