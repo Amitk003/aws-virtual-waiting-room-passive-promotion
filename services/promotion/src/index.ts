@@ -1,4 +1,4 @@
-import { DynamoDBClient, GetItemCommand, QueryCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, GetItemCommand, QueryCommand, UpdateItemCommand, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
 
 const ddb = new DynamoDBClient();
 const TABLE_NAME = process.env.TABLE_NAME!;
@@ -72,20 +72,61 @@ export async function handler(): Promise<void> {
   while (Date.now() - startTime < timeoutMs) {
     iteration++;
 
-    // Read current global state
+    // Read current global state (watermark only — session count is computed below)
     const globalState = await ddb.send(new GetItemCommand({
       TableName: TABLE_NAME,
       Key: {
         PK: { S: `EVENT#${EVENT_ID}#METADATA` },
         SK: { S: 'METADATA' },
       },
-      ProjectionExpression: 'ActivePurchaserCount, AdmittedUntilTimestamp',
+      ProjectionExpression: 'AdmittedUntilTimestamp',
     }));
 
-    const activePurchaserCount = Number(globalState.Item?.ActivePurchaserCount?.N || 0);
     const admittedUntilTimestamp = Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0);
 
-    const freeSlots = MAX_SLOTS - activePurchaserCount;
+    // Query GSI to count active (non-expired) sessions
+    const sessionQuery = await ddb.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      IndexName: 'SessionMetadataIndex',
+      KeyConditionExpression: 'GSIPK = :gsiPk',
+      ExpressionAttributeValues: {
+        ':gsiPk': { S: `EVENT#${EVENT_ID}#SESSION_META` },
+      },
+      ProjectionExpression: 'ExpiresAt, StartedAt',
+    }));
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    let validSessionCount = 0;
+    const deletePromises: Promise<any>[] = [];
+
+    for (const item of sessionQuery.Items || []) {
+      const expiresAt = Number(item.ExpiresAt?.N || 0);
+      if (expiresAt > nowSeconds) {
+        validSessionCount++;
+      } else {
+        // Expired session — delete immediately
+        const pk = item.PK?.S || '';
+        const sk = item.SK?.S || 'SESSION';
+        if (pk) {
+          deletePromises.push(ddb.send(new DeleteItemCommand({
+            TableName: TABLE_NAME,
+            Key: {
+              PK: { S: pk },
+              SK: { S: sk },
+            },
+          })));
+        }
+      }
+    }
+
+    // Fire-and-forget expired session deletions (don't block the loop)
+    if (deletePromises.length > 0) {
+      Promise.all(deletePromises).catch(err =>
+        console.error('Failed to delete expired sessions:', err)
+      );
+    }
+
+    const freeSlots = MAX_SLOTS - validSessionCount;
     if (freeSlots <= 0) {
       await sleep(1000);
       continue;

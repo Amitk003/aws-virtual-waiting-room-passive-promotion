@@ -31,7 +31,8 @@ export class InfraStack extends cdk.Stack {
     table.addGlobalSecondaryIndex({
       indexName: 'SessionMetadataIndex',
       partitionKey: { name: 'GSIPK', type: dynamodb.AttributeType.STRING },
-      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+      projectionType: dynamodb.ProjectionType.INCLUDE,
+      nonKeyAttributes: ['ExpiresAt', 'StartedAt'],
     });
 
     // --- Secrets Manager Secret for JWT Signing ---
