@@ -60,7 +60,9 @@ jobs:
 
       - name: CDK Diff
         working-directory: infra
-        run: npx cdk diff
+        run: |
+          npm install -g esbuild
+          npx cdk diff
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -81,6 +83,7 @@ jobs:
         working-directory: infra
         run: |
           npm ci
+          npm install -g esbuild
           npx cdk deploy --require-approval never
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
