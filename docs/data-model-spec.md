@@ -12,7 +12,7 @@ This is a single-table design in DynamoDB. All data goes into one table called `
 | Billing Mode | PAY_PER_REQUEST | Avoids account limit issues on deploy. Pre-warming for burst handled via CLI script. |
 | Partition Key | PK (String) | Generic key for all entity types |
 | Sort Key | SK (String) | Enables ordering and hierarchy |
-| GSI | SessionMetadataIndex (GSIPK, SK) | Keys-only projection for session counting and reconciliation |
+| GSI | SessionMetadataIndex (GSIPK) | Keys-only projection for session counting and reconciliation |
 | TTL Attribute | ExpiresAt (Number) | Auto-cleanup sessions and old tickets |
 | Streams | NEW_AND_OLD_IMAGES | Required for aggregator and TTL-auto-release |
 
@@ -69,7 +69,7 @@ Represents one user's active checkout session. Created dynamically when a user e
 |---------|-------|
 | Index Name | SessionMetadataIndex |
 | Hash Key | GSIPK (String) |
-| Sort Key | SK (String) |
+| Sort Key | (none - HASH only) |
 | Projection | KEYS_ONLY |
 
 **Purpose**: Used by the reconciliation Lambda to quickly count active sessions. Query `GSIPK = EVENT#<EventId>#SESSION_META` returns all session keys. Because sessions are capped at 1000, this query costs very little.

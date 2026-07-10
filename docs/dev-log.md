@@ -82,3 +82,67 @@ Files changed:
 - `docs/data-model-spec.md` - Full rewrite of entities section
 - `docs/access-patterns.md` - Full rewrite of patterns 5-9
 - `docs/dev-log.md` - This entry
+
+---
+
+## Branch: feature/phase-2-iac-setup
+
+### 2026-07-10 - CDK v2 TypeScript project setup and stack definition
+
+Commands ran:
+- `git checkout main && git checkout -b feature/phase-2-iac-setup` - Create phase 2 feature branch
+- `npx aws-cdk@latest init app --language typescript --generate-only` - Initialize CDK project in infra/
+- `npm install` - Install CDK dependencies (aws-cdk-lib, constructs, jest, typescript, etc.)
+- `npx tsc --noEmit` - Verify TypeScript compilation (fixed KeySpec enum and addAlias API)
+- `npx cdk synth` - Generate CloudFormation template (verified output)
+
+Packages installed (via CDK init + npm install):
+- aws-cdk-lib ^2.261.0
+- constructs ^10.5.0
+- aws-cdk 2.1130.0 (dev)
+- typescript ~5.9.3 (dev)
+- jest ^30 (dev)
+- ts-jest ^29 (dev)
+- ts-node ^10.9.2 (dev)
+- @types/node ^24.10.1 (dev)
+- @types/jest ^30 (dev)
+
+Files created:
+- `infra/bin/infra.ts` - CDK app entry point
+- `infra/lib/infra-stack.ts` - Stack with DynamoDB table, KMS key, IAM roles
+- `infra/test/infra.test.ts` - Unit test template
+- `infra/package.json` - Node.js project config
+- `infra/tsconfig.json` - TypeScript config
+- `infra/cdk.json` - CDK toolkit config
+- `infra/jest.config.js` - Jest config
+- `infra/.gitignore` - CDK-specific ignore rules
+- `docs/iac-setup.md` - IaC documentation
+
+Stack resources defined:
+- DynamoDB Table: VirtualWaitingRoom (PAY_PER_REQUEST, PK/SK, Streams, TTL, GSI)
+- KMS Key: Asymmetric ECC_NIST_P256 for JWT signing (with dynamic alias)
+- IAM Roles: None (removed - Lambda functions in later phases will auto-create their own)
+
+Notes:
+- Table uses PAY_PER_REQUEST to avoid account limit errors on deployment
+- Pre-warming to 1M WCU will be done via a separate CLI script before the event
+- CDK stack produces AWS::DynamoDB::Table (not GlobalTable) for NoSQL Workbench compatibility
+- KMS key has removalPolicy: DESTROY for safe dev cleanup (change to RETAIN for production)
+- KMS pending window set to 7 days (minimum allowed)
+
+### 2026-07-10 - Code review fixes: removed IAM roles, hardcoded names, added KMS cleanup
+
+Commands ran:
+- Updated `infra/lib/infra-stack.ts` - Removed 6 manual IAM roles (~60 lines removed), removed hardcoded tableName, added removalPolicy: DESTROY on KMS key, added dynamic alias suffix
+- Updated `docs/iac-setup.md` - Reflected all changes
+
+Reason for changes:
+- IAM roles were pure boilerplate; CDK's lambda.Function auto-creates them with inline grants
+- Hardcoded table name would conflict in multi-environment deployments
+- KMS key needed removalPolicy: DESTROY for clean `cdk destroy` during development
+- KMS alias needed dynamic suffix to prevent conflicts on redeploy
+
+Files changed:
+- `infra/lib/infra-stack.ts` - Major cleanup
+- `docs/iac-setup.md` - Updated to reflect removal of IAM roles
+- `docs/dev-log.md` - This entry
