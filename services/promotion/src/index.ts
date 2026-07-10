@@ -4,9 +4,6 @@ const ddb = new DynamoDBClient();
 const TABLE_NAME = process.env.TABLE_NAME!;
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const MAX_SLOTS = 1000;
-
-// In-memory cache: density map is read once per 2s and reused across
-// rapid 1s Lambda invocations.
 const CACHE_TTL_MS = 2000;
 
 interface CachedDensity {
@@ -23,7 +20,6 @@ async function loadDensity(eventId: string): Promise<CachedDensity['buckets']> {
     return densityCache.buckets;
   }
 
-  // Density map is sharded across 10 sub-partitions. Read all in parallel.
   const densityPks = Array.from({ length: 10 }, (_, i) => `EVENT#${eventId}#DENSITY#SHARD#${i}`);
 
   const results = await Promise.all(densityPks.map(pk =>
@@ -62,32 +58,23 @@ async function loadDensity(eventId: string): Promise<CachedDensity['buckets']> {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function handler(): Promise<void> {
-  // EventBridge minimum rate is 1 minute, so we loop internally to
-  // advance the watermark multiple times per invocation.
-  // Timeout is 5s, giving us ~4 iterations at 1s intervals.
   const startTime = Date.now();
   const timeoutMs = 59000;
-  let iteration = 0;
 
   while (Date.now() - startTime < timeoutMs) {
-    iteration++;
-
-    // Read current global state (watermark only — session count is computed below)
     const globalState = await ddb.send(new GetItemCommand({
       TableName: TABLE_NAME,
       Key: {
         PK: { S: `EVENT#${EVENT_ID}#METADATA` },
         SK: { S: 'METADATA' },
       },
-      ProjectionExpression: 'AdmittedUntilTimestamp',
+      ProjectionExpression: 'AdmittedUntilTimestamp, PartialAdmittedBucket, AdmittedFromBucket',
     }));
 
     const admittedUntilTimestamp = Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0);
+    const partialBucket = Number(globalState.Item?.PartialAdmittedBucket?.N || 0);
+    const admittedFromBucket = Number(globalState.Item?.AdmittedFromBucket?.N || 0);
 
-    // Query GSI for active (non-expired) sessions only.
-    // Since ExpiresAt is now the GSI sort key, the condition
-    // ExpiresAt > :now filters out expired sessions at the DB level.
-    // With max 1000 active sessions, the query never needs pagination.
     const nowSeconds = Math.floor(Date.now() / 1000);
     const sessionQuery = await ddb.send(new QueryCommand({
       TableName: TABLE_NAME,
@@ -107,31 +94,39 @@ export async function handler(): Promise<void> {
       continue;
     }
 
-    // Load density map (cached for 2s) and walk forward from watermark
     const densityBuckets = await loadDensity(EVENT_ID);
     const currentWatermarkSec = Math.floor(admittedUntilTimestamp / 1000);
 
     let slotsFilled = 0;
     let newWatermarkSec = currentWatermarkSec;
     let tieBreakerThreshold: number | null = null;
+    let partialBucketCount: number | null = null;
 
     for (const bucket of densityBuckets) {
-      if (bucket.bucketTs <= currentWatermarkSec) continue;
+      // Skip fully-admitted buckets. Re-process a partially-admitted bucket
+      // by calculating remaining users from the stored count.
+      if (bucket.bucketTs < currentWatermarkSec) continue;
+      if (bucket.bucketTs === currentWatermarkSec && bucket.bucketTs !== partialBucket) continue;
+
+      let effectiveCount = bucket.count;
+      if (bucket.bucketTs === partialBucket) {
+        // This bucket was partially admitted in a prior iteration.
+        // Only the remaining users (not yet admitted) count toward freeSlots.
+        effectiveCount = Math.max(0, bucket.count - admittedFromBucket);
+      }
 
       const remaining = freeSlots - slotsFilled;
       if (remaining <= 0) break;
 
-      const toAdmit = Math.min(bucket.count, remaining);
+      const toAdmit = Math.min(effectiveCount, remaining);
 
-      if (toAdmit < bucket.count) {
-        // Partial bucket: set tie-breaker threshold so only a fraction
-        // of users in this second are eligible to claim a slot.
-        // hash(fanId) % 100 < TieBreakerThreshold gates admission.
-        tieBreakerThreshold = Math.ceil((toAdmit / bucket.count) * 100);
+      if (toAdmit < effectiveCount) {
+        tieBreakerThreshold = Math.ceil((toAdmit / effectiveCount) * 100);
         if (tieBreakerThreshold < 1) tieBreakerThreshold = 1;
         if (tieBreakerThreshold > 99) tieBreakerThreshold = 99;
         newWatermarkSec = bucket.bucketTs;
         slotsFilled += toAdmit;
+        partialBucketCount = (bucket.bucketTs === partialBucket ? admittedFromBucket : 0) + toAdmit;
         break;
       }
 
@@ -139,20 +134,26 @@ export async function handler(): Promise<void> {
       if (bucket.bucketTs > newWatermarkSec) {
         newWatermarkSec = bucket.bucketTs;
       }
+      partialBucketCount = null;
 
       if (slotsFilled >= freeSlots) break;
     }
 
     const newWatermarkMs = newWatermarkSec * 1000;
     if (newWatermarkMs > admittedUntilTimestamp) {
-      let updateExpression = 'SET AdmittedUntilTimestamp = :newWatermark';
+      let updateExpression = 'SET AdmittedUntilTimestamp = :newWatermark, TieBreakerThreshold = :threshold';
       const expressionAttributeValues: Record<string, any> = {
         ':newWatermark': { N: String(newWatermarkMs) },
+        ':threshold': { N: String(tieBreakerThreshold ?? 100) },
       };
 
-      if (tieBreakerThreshold !== null) {
-        updateExpression += ', TieBreakerThreshold = :threshold';
-        expressionAttributeValues[':threshold'] = { N: String(tieBreakerThreshold) };
+      if (partialBucketCount !== null) {
+        updateExpression += ', PartialAdmittedBucket = :partialBucket, AdmittedFromBucket = :admittedCount';
+        expressionAttributeValues[':partialBucket'] = { N: String(partialBucket!) };
+        expressionAttributeValues[':admittedCount'] = { N: String(partialBucketCount) };
+      } else {
+        updateExpression += ', PartialAdmittedBucket = :zero, AdmittedFromBucket = :zero';
+        expressionAttributeValues[':zero'] = { N: '0' };
       }
 
       await ddb.send(new UpdateItemCommand({
