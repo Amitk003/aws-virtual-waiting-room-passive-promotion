@@ -445,3 +445,15 @@ Files changed:
 - `README.md` — Removed KMS, updated tech stack, project structure, phases, setup instructions
 - `infra/README.md` — Removed auto-generated CDK template file
 - `docs/dev-log.md` — This entry
+
+---
+
+### 2026-07-10 - Remediation: tie-breaking ms/s mismatch, GSI sort key, scripts, docs
+
+Commit 1: Tie-breaking now compares entryTimestamp and watermark at second granularity (Math.floor both to seconds before equality check). Affected status-api and slot-handler.
+
+Commit 2: SessionMetadataIndex now has ExpiresAt as sort key (HASH + RANGE). Promotion Engine and Reconciliation query with `GSIPK = :g AND ExpiresAt > :now` + `Select COUNT`. No post-query filtering. No pagination needed (max 1000 sessions). Promotion Engine no longer SETs the counter, eliminating atomicity race.
+
+Commit 3: Fixed prewarm-table.js (adds GSI throughput during provisioned switch), generate-key.js (corrected crypto import, added kid field), check-auth.js (bodyEncoding: 'text'), test-e2e.js (gates claim/release behind TABLE_NAME check like promote step).
+
+Commit 4: Updated access-patterns.md (Patterns 5-10 aligned with current code), data-model-spec.md (GSI sort key, INCLUDE projection, single-partition density PK, added Tracking entity), architecture doc (GSI counting flow, no more expired-session deletion), sample data (6 SessionItems, 3 DensityBuckets, Tracking entity).

@@ -12,7 +12,7 @@ This is a single-table design in DynamoDB. All data goes into one table called `
 | Billing Mode | PAY_PER_REQUEST | Avoids account limit issues on deploy. Pre-warming for burst handled via CLI script. |
 | Partition Key | PK (String) | Generic key for all entity types |
 | Sort Key | SK (String) | Enables ordering and hierarchy |
-| GSI | SessionMetadataIndex (GSIPK) | Keys-only projection for session counting and reconciliation |
+| GSI | SessionMetadataIndex (GSIPK + ExpiresAt) | Session counting with sort-key filtering |
 | TTL Attribute | ExpiresAt (Number) | Auto-cleanup sessions and old tickets |
 | Streams | NEW_AND_OLD_IMAGES | Required for aggregator and TTL-auto-release |
 
@@ -55,9 +55,9 @@ Shard-level pre-aggregation reduces GlobalState updates from millions to ~2000/s
 
 | Attribute | Type | Example | Notes |
 |-----------|------|---------|-------|
-| PK | String | `EVENT#match2026#DENSITY#SHARD#7` | Hash of bucket timestamp mod 20 (scatters writes) |
+| PK | String | `EVENT#match2026#DENSITY` | Single partition (pre-aggregation keeps write rate < 1000 WCU) |
 | SK | String | `BUCKET#1719997200` | Timestamp in seconds (rounded down) |
-| Count | Number | `4521` | Number of users who joined in this second |
+| Count | Number | `15000` | Number of users who joined in this second |
 
 **Why separate items instead of a JSON map on GlobalState**: Atomic updates via
 `ADD Count :inc` are safe across concurrent aggregator instances. A JSON string
@@ -86,6 +86,21 @@ Represents one user's active checkout session. Created dynamically when a user e
 
 **Purpose**: Controls how many users can be in the checkout process at the same time. Max 1000. TTL auto-clears abandoned sessions. Stream triggers decrement `ActivePurchaserCount` on cleanup.
 
+### 5. Tracking
+
+Tracks a known user who has not yet joined the queue (pre-registration or admin-initiated).
+
+| Attribute | Type | Example | Notes |
+|-----------|------|---------|-------|
+| PK | String | `EVENT#match2026#TRACKING#fan_11223` | Per-user tracking item |
+| SK | String | `PENDING` | Fixed sort key |
+| FanId | String | `fan_11223` | User identifier |
+| ExpiresAt | Number | `1720083605` | TTL expiry for cleanup |
+
+**Purpose**: Used by the ingestion handler to detect double-join attempts.
+When a user joins, the handler writes a tracking item first.
+If a tracking item already exists, the join is rejected.
+
 ## Density Map
 
 The density map is stored as individual DensityBucket items (one per 1-second
@@ -110,10 +125,10 @@ own Lambda instance, so aggregation is naturally parallelized.
 |---------|-------|
 | Index Name | SessionMetadataIndex |
 | Hash Key | GSIPK (String) |
-| Sort Key | (none - HASH only) |
-| Projection | KEYS_ONLY |
+| Sort Key | ExpiresAt (Number) |
+| Projection | INCLUDE (StartedAt) |
 
-**Purpose**: Used by the reconciliation Lambda to quickly count active sessions. Query `GSIPK = EVENT#<EventId>#SESSION_META` returns all session keys. Because sessions are capped at 1000, this query costs very little.
+**Purpose**: Used by the promotion engine (every 1s) and reconciliation Lambda (every 5min) to count active sessions. Query `GSIPK = EVENT#<Id>#SESSION_META AND ExpiresAt > :now` returns only non-expired sessions. The sort key on ExpiresAt means expired sessions are filtered at the DB level, so no post-query filtering or pagination is needed. Sessions are capped at 1000, so the query always fits in one page.
 
 ## Key Design Choices
 

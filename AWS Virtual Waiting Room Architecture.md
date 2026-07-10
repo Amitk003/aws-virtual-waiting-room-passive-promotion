@@ -154,15 +154,15 @@ If the counter is at capacity, the transaction fails atomically — no session i
 
 The Promotion Engine (runs continuously via EventBridge schedule + 58s internal loop) does not rely on TTL stream events or counter reads for replenishment. Instead it:
 
-1. **Queries** the `SessionMetadataIndex` GSI (`GSIPK = EVENT#<id>#SESSION_META`) for all session items.
-2. **Filters** expired sessions in memory by comparing `ExpiresAt` against current time.
-3. **Counts** only valid (non-expired) sessions to get the real `ActivePurchaserCount`.
-4. **Deletes** expired session items immediately (fire-and-forget).
-5. Calculates `freeSlots = 1000 - validCount`, then advances the watermark to admit the next batch of users (using tie-breaking for partial-second precision).
+1. **Queries** the `SessionMetadataIndex` GSI with `GSIPK = EVENT#<id>#SESSION_META AND ExpiresAt > :now`, using the sort key on ExpiresAt to filter expired sessions at the DB level.
+2. **Counts** results via `Select: COUNT` to get the real active session count.
+3. Calculates `freeSlots = 1000 - validCount`, then advances the watermark to admit the next batch of users (using tie-breaking for partial-second precision).
+
+The sort key on ExpiresAt means expired sessions are excluded by DynamoDB itself, so no post-query filtering or pagination is needed. Sessions are capped at 1000, so the query always fits in one page.
+
+Expired sessions are cleaned up asynchronously by DynamoDB TTL (no immediate deletion needed). The TTL default delay (up to 48h) is acceptable because the promotion engine continuously recomputes the real count from the GSI every second.
 
 A separate Reconciliation Lambda runs every 5 minutes using the same GSI-based counting to correct any counter drift.
-
-This approach avoids the 48-hour asynchronous delay of DynamoDB TTL — slots are freed within seconds of session expiry.
 
 ## **Access Pattern Matrix**
 
@@ -174,7 +174,7 @@ A well-architected DynamoDB solution must define its access patterns prior to de
 | **2\. Aggregator Stream Read** | DDB Stream | N/A | N/A | Captures QueueTicket INSERT events for density aggregation. |
 | **3\. Retrieve Global State** | Table | PK = EVENT\#\<Id\>\#METADATA, SK = METADATA | None | Point-read for watermark and tie-breaker threshold. Heavily cached at edge via CloudFront. |
 | **4\. Advance Watermark** | Table | PK = EVENT\#\<Id\>\#METADATA, SK = METADATA | AdmittedUntilTimestamp < :newWatermark | Single UpdateItem to shift the admission watermark (passive promotion). |
-| **5\. Count Active Sessions (Replenishment + Reconciliation)** | GSI | GSIPK = EVENT\#\<Id\>\#SESSION\_META | None | Query the `SessionMetadataIndex` (INCLUDE projection with ExpiresAt) to count only non-expired sessions. Expired sessions are deleted inline. |
+| **5\. Count Active Sessions (Replenishment + Reconciliation)** | GSI | GSIPK = EVENT\#\<Id\>\#SESSION\_META AND ExpiresAt \> :now | None | Query the `SessionMetadataIndex` with sort key on ExpiresAt. `Select COUNT` returns only non-expired sessions filtered at the DB level. No post-query filtering needed. |
 | **6\. Claim Checkout Slot** | Table (TransactWriteItems) | N/A | attribute\_not\_exists(PK) AND ActivePurchaserCount < 1000 | Atomic transaction: creates SessionItem + increments counter. Fails atomically if counter at 1000. |
 | **7\. Release Checkout Slot** | Table | PK = EVENT\#\<Id\>\#SESSION\#\<FanId\>, SK = SESSION | attribute\_exists(PK) | Conditional DeleteItem (to prevent double-release), then decrement counter. |
 | **8\. Get Density Map** | Table | PK = EVENT\#\<Id\>\#DENSITY, SK begins\_with BUCKET\# | None | Single Query (not 20 parallel) to retrieve all per-second density buckets. |

@@ -31,11 +31,12 @@
           {
             "IndexName": "SessionMetadataIndex",
             "KeySchema": [
-              { "AttributeName": "GSIPK", "KeyType": "HASH" }
+              { "AttributeName": "GSIPK", "KeyType": "HASH" },
+              { "AttributeName": "ExpiresAt", "KeyType": "RANGE" }
             ],
             "Projection": {
               "ProjectionType": "INCLUDE",
-              "NonKeyAttributes": ["ExpiresAt", "StartedAt"]
+              "NonKeyAttributes": ["StartedAt"]
             }
           }
         ],
@@ -64,9 +65,27 @@
             "ExpiresAt": { "N": "1720083605" }
           },
           {
+            "PK": { "S": "EVENT#match2026#SHARD#191" },
+            "SK": { "S": "TS#1719997206500#FAN#fan_33456" },
+            "FanId": { "S": "fan_33456" },
+            "EntryTimestamp": { "N": "1719997206500" },
+            "ShardId": { "N": "191" },
+            "ExpiresAt": { "N": "1720083605" }
+          },
+          {
+            "PK": { "S": "EVENT#match2026#DENSITY" },
+            "SK": { "S": "BUCKET#1719997199" },
+            "Count": { "N": "14820" }
+          },
+          {
             "PK": { "S": "EVENT#match2026#DENSITY" },
             "SK": { "S": "BUCKET#1719997200" },
             "Count": { "N": "15000" }
+          },
+          {
+            "PK": { "S": "EVENT#match2026#DENSITY" },
+            "SK": { "S": "BUCKET#1719997201" },
+            "Count": { "N": "15110" }
           },
           {
             "PK": { "S": "EVENT#match2026#SESSION#fan_8872" },
@@ -77,7 +96,39 @@
             "ExpiresAt": { "N": "1720083605" }
           },
           {
-            "PK": { "S": "EVENT#match2026#FAN#fan_11223" },
+            "PK": { "S": "EVENT#match2026#SESSION#fan_9901" },
+            "SK": { "S": "SESSION" },
+            "GSIPK": { "S": "EVENT#match2026#SESSION_META" },
+            "FanId": { "S": "fan_9901" },
+            "StartedAt": { "N": "1719997701" },
+            "ExpiresAt": { "N": "1720083610" }
+          },
+          {
+            "PK": { "S": "EVENT#match2026#SESSION#fan_4455" },
+            "SK": { "S": "SESSION" },
+            "GSIPK": { "S": "EVENT#match2026#SESSION_META" },
+            "FanId": { "S": "fan_4455" },
+            "StartedAt": { "N": "1719997702" },
+            "ExpiresAt": { "N": "1720083615" }
+          },
+          {
+            "PK": { "S": "EVENT#match2026#SESSION#fan_6677" },
+            "SK": { "S": "SESSION" },
+            "GSIPK": { "S": "EVENT#match2026#SESSION_META" },
+            "FanId": { "S": "fan_6677" },
+            "StartedAt": { "N": "1719997703" },
+            "ExpiresAt": { "N": "1720083620" }
+          },
+          {
+            "PK": { "S": "EVENT#match2026#SESSION#fan_8899" },
+            "SK": { "S": "SESSION" },
+            "GSIPK": { "S": "EVENT#match2026#SESSION_META" },
+            "FanId": { "S": "fan_8899" },
+            "StartedAt": { "N": "1719997705" },
+            "ExpiresAt": { "N": "1720083630" }
+          },
+          {
+            "PK": { "S": "EVENT#match2026#TRACKING#fan_11223" },
             "SK": { "S": "PENDING" },
             "FanId": { "S": "fan_11223" },
             "ExpiresAt": { "N": "1720083605" }
