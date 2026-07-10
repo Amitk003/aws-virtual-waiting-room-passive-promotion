@@ -1,0 +1,17 @@
+{
+  "name": "promotion-service",
+  "version": "1.0.0",
+  "description": "Promotion Engine Lambda for the Virtual Waiting Room",
+  "type": "module",
+  "scripts": {
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.700.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^26.1.1",
+    "typescript": "~5.9.3"
+  }
+}

@@ -358,3 +358,38 @@ Slot handler design:
 - Release: Deletes SessionItem, decrements ActivePurchaserCount.
 - Session TTL: 5 minutes for auto-cleanup on abandon.
 - Reconciliation: Queries SessionMetadataIndex GSI, counts active sessions, sets ActivePurchaserCount to actual count.
+
+---
+
+## Branch: feature/phase-7-promotion-engine
+
+### 2026-07-10 - Promotion Engine (watermark advancement)
+
+Commands ran:
+- Created `services/promotion/` project directory
+- `npm install` in services/promotion/ - Installed deps (33 packages)
+- `npx tsc --noEmit` - Verified TypeScript compilation
+- `npx cdk synth` - Generated CloudFormation (promotion bundle 3.7kb)
+
+Files created:
+- `services/promotion/package.json` - Node.js project config
+- `services/promotion/tsconfig.json` - TypeScript config
+- `services/promotion/src/index.ts` - Promotion Engine Lambda
+- `docs/promotion-engine.md` - Promotion Engine documentation
+
+Files modified:
+- `infra/lib/infra-stack.ts` - Added PromotionEngine Lambda + EventBridge schedule
+- `docs/dev-log.md` - This entry
+
+New stack resources:
+- Lambda: PromotionEngine (Node.js 22, ARM64, 256MB, 5s timeout)
+- EventBridge Rule: Every 1 minute, targets PromotionEngine
+- IAM: Auto-created role with DynamoDB read/write permissions
+
+Promotion engine design:
+- Runs every 1 minute (EventBridge minimum rate), loops internally every 1s up to 5s timeout
+- Reads GlobalState, calculates free slots (1000 - ActivePurchaserCount)
+- Loads density map from all 20 shards (cached in global scope for 2s)
+- Walks forward from watermark, fills free slots from density buckets
+- Advances AdmittedUntilTimestamp via single UpdateItem
+- Zero DB load when slots are full (only GetItem per iteration)

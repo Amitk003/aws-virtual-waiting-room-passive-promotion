@@ -188,6 +188,36 @@ export class InfraStack extends cdk.Stack {
       targets: [new eventTargets.LambdaFunction(reconciliationFn)],
     });
 
+    // --- Promotion Engine Lambda ---
+    // Runs every 1 second. Reads the density map and advances
+    // AdmittedUntilTimestamp to admit users as checkout slots free up.
+
+    const promotionFn = new lambdaNodejs.NodejsFunction(this, 'PromotionEngine', {
+      entry: path.join(projectRoot, 'services', 'promotion', 'src', 'index.ts'),
+      projectRoot,
+      depsLockFilePath: path.join(projectRoot, 'services', 'promotion', 'package-lock.json'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(5),
+      environment: {
+        TABLE_NAME: table.tableName,
+      },
+      bundling: {
+        target: 'es2022',
+        format: lambdaNodejs.OutputFormat.ESM,
+        sourceMap: true,
+      },
+    });
+
+    table.grantReadWriteData(promotionFn);
+
+    new events.Rule(this, 'PromotionSchedule', {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(1)),
+      targets: [new eventTargets.LambdaFunction(promotionFn)],
+    });
+
     // --- API Gateway HTTP API ---
 
     const api = new apigwv2.HttpApi(this, 'WaitingRoomApi', {
