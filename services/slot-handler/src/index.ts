@@ -1,4 +1,4 @@
-import { DynamoDBClient, PutItemCommand, DeleteItemCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, GetItemCommand, DeleteItemCommand, UpdateItemCommand, TransactWriteItemsCommand } from '@aws-sdk/client-dynamodb';
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { verifyJwt } from './jwt.js';
 
@@ -26,6 +26,29 @@ function extractEventId(path: string): string | null {
   return null;
 }
 
+function hashCodeFanId(fanId: string): number {
+  let hash = 0;
+  for (let i = 0; i < fanId.length; i++) {
+    const char = fanId.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function isAdmitted(
+  entryTimestamp: number,
+  admittedUntilTimestamp: number,
+  fanId: string,
+  tieBreakerThreshold: number
+): boolean {
+  if (entryTimestamp < admittedUntilTimestamp) return true;
+  if (entryTimestamp === admittedUntilTimestamp) {
+    return hashCodeFanId(fanId) % 100 < tieBreakerThreshold;
+  }
+  return false;
+}
+
 export async function handler(
   event: APIGatewayProxyEventV2
 ): Promise<APIGatewayProxyResultV2> {
@@ -49,52 +72,82 @@ export async function handler(
     const method = event.requestContext.http.method;
 
     if (method === 'POST' && event.rawPath.includes('/claim')) {
-      // Create session item
-      await ddb.send(new PutItemCommand({
+      // Read GlobalState to check admission eligibility
+      const globalState = await ddb.send(new GetItemCommand({
         TableName: TABLE_NAME,
-        Item: {
-          PK: { S: sessionPk },
-          SK: { S: 'SESSION' },
-          GSIPK: { S: `EVENT#${eventId}#SESSION_META` },
-          FanId: { S: fanId },
-          StartedAt: { N: String(nowSeconds) },
-          ExpiresAt: { N: String(expirySeconds) },
+        Key: {
+          PK: { S: `EVENT#${eventId}#METADATA` },
+          SK: { S: 'METADATA' },
         },
-        ConditionExpression: 'attribute_not_exists(PK)',
+        ProjectionExpression: 'AdmittedUntilTimestamp, TieBreakerThreshold',
       }));
 
-      // Increment counter, capped at 1000
-      // If counter hits 1000, the condition fails and we rollback
+      const admittedUntilTimestamp = Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0);
+      const tieBreakerThreshold = Number(globalState.Item?.TieBreakerThreshold?.N || 100);
+
+      if (!isAdmitted(jwtPayload.entryTimestamp, admittedUntilTimestamp, fanId, tieBreakerThreshold)) {
+        return {
+          statusCode: 403,
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ error: 'You are not eligible to enter checkout yet.' }),
+        };
+      }
+
+      // Create session and increment counter atomically via transaction
       try {
-        await ddb.send(new UpdateItemCommand({
-          TableName: TABLE_NAME,
-          Key: {
-            PK: { S: `EVENT#${eventId}#METADATA` },
-            SK: { S: 'METADATA' },
-          },
-          UpdateExpression: 'ADD ActivePurchaserCount :one',
-          ConditionExpression: 'ActivePurchaserCount < :max OR attribute_not_exists(ActivePurchaserCount)',
-          ExpressionAttributeValues: {
-            ':one': { N: '1' },
-            ':max': { N: '1000' },
-          },
+        await ddb.send(new TransactWriteItemsCommand({
+          TransactItems: [
+            {
+              Put: {
+                TableName: TABLE_NAME,
+                Item: {
+                  PK: { S: sessionPk },
+                  SK: { S: 'SESSION' },
+                  GSIPK: { S: `EVENT#${eventId}#SESSION_META` },
+                  FanId: { S: fanId },
+                  StartedAt: { N: String(nowSeconds) },
+                  ExpiresAt: { N: String(expirySeconds) },
+                },
+                ConditionExpression: 'attribute_not_exists(PK)',
+              },
+            },
+            {
+              Update: {
+                TableName: TABLE_NAME,
+                Key: {
+                  PK: { S: `EVENT#${eventId}#METADATA` },
+                  SK: { S: 'METADATA' },
+                },
+                UpdateExpression: 'ADD ActivePurchaserCount :one',
+                ConditionExpression: 'ActivePurchaserCount < :max OR attribute_not_exists(ActivePurchaserCount)',
+                ExpressionAttributeValues: {
+                  ':one': { N: '1' },
+                  ':max': { N: '1000' },
+                },
+              },
+            },
+          ],
         }));
       } catch (err: any) {
-        // Counter at 1000 — rollback session item
-        await ddb.send(new DeleteItemCommand({
-          TableName: TABLE_NAME,
-          Key: {
-            PK: { S: sessionPk },
-            SK: { S: 'SESSION' },
-          },
-        }));
-
-        if (err.name === 'ConditionalCheckFailedException') {
-          return {
-            statusCode: 429,
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ error: 'All checkout slots are full. Try again shortly.' }),
-          };
+        if (err.name === 'TransactionCanceledException') {
+          // Check which item caused the cancellation
+          const reasons = err.CancellationReasons || [];
+          // Index 1 is the counter update — if it failed, slots are full
+          if (reasons[1]?.Code === 'ConditionalCheckFailed') {
+            return {
+              statusCode: 429,
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ error: 'All checkout slots are full. Try again shortly.' }),
+            };
+          }
+          // Index 0 is the session create — if it failed, session already exists
+          if (reasons[0]?.Code === 'ConditionalCheckFailed') {
+            return {
+              statusCode: 409,
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ error: 'Session already exists' }),
+            };
+          }
         }
         throw err;
       }
