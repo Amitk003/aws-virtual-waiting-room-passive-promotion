@@ -9,6 +9,8 @@ import * as apigwIntegrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import * as path from 'node:path';
 
 export class InfraStack extends cdk.Stack {
@@ -130,6 +132,62 @@ export class InfraStack extends cdk.Stack {
     table.grantReadData(statusFn);
     signingSecret.grantRead(statusFn);
 
+    // --- Slot Handler Lambda ---
+    // POST /claim  - Creates a SessionItem and increments ActivePurchaserCount (capped at 1000)
+    // POST /release - Deletes a SessionItem and decrements ActivePurchaserCount
+
+    const slotFn = new lambdaNodejs.NodejsFunction(this, 'SlotHandler', {
+      entry: path.join(projectRoot, 'services', 'slot-handler', 'src', 'index.ts'),
+      projectRoot,
+      depsLockFilePath: path.join(projectRoot, 'services', 'slot-handler', 'package-lock.json'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(10),
+      environment: {
+        TABLE_NAME: table.tableName,
+        SIGNING_SECRET_ID: signingSecret.secretName,
+      },
+      bundling: {
+        target: 'es2022',
+        format: lambdaNodejs.OutputFormat.ESM,
+        sourceMap: true,
+      },
+    });
+
+    table.grantReadWriteData(slotFn);
+    signingSecret.grantRead(slotFn);
+
+    // --- Reconciliation Lambda ---
+    // Runs every 5 minutes to correct ActivePurchaserCount drift.
+
+    const reconciliationFn = new lambdaNodejs.NodejsFunction(this, 'ReconciliationHandler', {
+      entry: path.join(projectRoot, 'services', 'reconciliation', 'src', 'index.ts'),
+      projectRoot,
+      depsLockFilePath: path.join(projectRoot, 'services', 'reconciliation', 'package-lock.json'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(30),
+      environment: {
+        TABLE_NAME: table.tableName,
+      },
+      bundling: {
+        target: 'es2022',
+        format: lambdaNodejs.OutputFormat.ESM,
+        sourceMap: true,
+      },
+    });
+
+    table.grantReadWriteData(reconciliationFn);
+
+    new events.Rule(this, 'ReconciliationSchedule', {
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      targets: [new eventTargets.LambdaFunction(reconciliationFn)],
+    });
+
     // --- API Gateway HTTP API ---
 
     const api = new apigwv2.HttpApi(this, 'WaitingRoomApi', {
@@ -156,6 +214,24 @@ export class InfraStack extends cdk.Stack {
       integration: new apigwIntegrations.HttpLambdaIntegration(
         'StatusIntegration',
         statusFn
+      ),
+    });
+
+    api.addRoutes({
+      path: '/api/v1/event/{eventId}/claim',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new apigwIntegrations.HttpLambdaIntegration(
+        'ClaimIntegration',
+        slotFn
+      ),
+    });
+
+    api.addRoutes({
+      path: '/api/v1/event/{eventId}/release',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new apigwIntegrations.HttpLambdaIntegration(
+        'ReleaseIntegration',
+        slotFn
       ),
     });
 
