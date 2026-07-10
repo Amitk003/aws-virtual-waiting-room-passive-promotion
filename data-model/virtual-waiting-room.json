@@ -1,61 +1,50 @@
 {
-  "ModelName": "HighThroughputVirtualWaitingRoom",
-  "ModelMetadata": {
-    "Author": "AWS Builder Challenge Participant",
-    "DateCreated": "Jul 10, 2026, 12:00 PM",
-    "DateLastModified": "Jul 10, 2026, 12:00 PM",
-    "Description": "Zero-Write Passive Promotion architecture using Time-Density Watermarking and Write Sharding to fairly queue 10 million users."
-  },
-  "DataModel": {
-    "Tables": [
-      {
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Virtual Waiting Room table for Zero-Write Passive Promotion architecture using Time-Density Watermarking",
+  "Resources": {
+    "VirtualWaitingRoomTable": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
         "TableName": "VirtualWaitingRoom",
-        "KeySchema": [
-          { "AttributeName": "PK", "KeyType": "HASH" },
-          { "AttributeName": "SK", "KeyType": "RANGE" }
-        ],
-        "TableAttributes": [
-          { "AttributeName": "PK", "AttributeType": "S" },
-          { "AttributeName": "SK", "AttributeType": "S" },
-          { "AttributeName": "FanId", "AttributeType": "S" },
-          { "AttributeName": "EntryTimestamp", "AttributeType": "N" },
-          { "AttributeName": "ShardId", "AttributeType": "N" },
-          { "AttributeName": "AdmittedUntilTimestamp", "AttributeType": "N" },
-          { "AttributeName": "ActivePurchaserCount", "AttributeType": "N" },
-          { "AttributeName": "TotalQueued", "AttributeType": "N" },
-          { "AttributeName": "TimeDensityMap", "AttributeType": "S" },
-          { "AttributeName": "ActiveUserId", "AttributeType": "S" },
-          { "AttributeName": "ExpiresAt", "AttributeType": "N" },
-          { "AttributeName": "SlotId", "AttributeType": "S" }
-        ],
-        "GlobalSecondaryIndexes": [],
-        "LocalSecondaryIndexes": [],
-        "TableData": [
+        "AttributeDefinitions": [
           {
-            "PK": { "S": "EVENT#match2026#SHARD#845" },
-            "SK": { "S": "TS#1719997205124#FAN#fan_12345" },
-            "FanId": { "S": "fan_12345" },
-            "EntryTimestamp": { "N": "1719997205124" },
-            "ShardId": { "N": "845" },
-            "ExpiresAt": { "N": "1720083605" }
+            "AttributeName": "PK",
+            "AttributeType": "S"
           },
           {
-            "PK": { "S": "EVENT#match2026#METADATA" },
-            "SK": { "S": "METADATA" },
-            "AdmittedUntilTimestamp": { "N": "1719997202000" },
-            "ActivePurchaserCount": { "N": "950" },
-            "TotalQueued": { "N": "2500000" },
-            "TimeDensityMap": { "S": "[{\"t\":1719997200,\"c\":15000},{\"t\":1719997201,\"c\":45000}]" }
-          },
-          {
-            "PK": { "S": "EVENT#match2026#ACTIVE_SLOTS" },
-            "SK": { "S": "SLOT#0442" },
-            "ActiveUserId": { "S": "fan_8872" },
-            "ExpiresAt": { "N": "1719997800" }
+            "AttributeName": "SK",
+            "AttributeType": "S"
           }
         ],
-        "DataAccess": {}
+        "KeySchema": [
+          {
+            "AttributeName": "PK",
+            "KeyType": "HASH"
+          },
+          {
+            "AttributeName": "SK",
+            "KeyType": "RANGE"
+          }
+        ],
+        "BillingMode": "PROVISIONED",
+        "ProvisionedThroughput": {
+          "ReadCapacityUnits": "5000",
+          "WriteCapacityUnits": "1000000"
+        },
+        "StreamSpecification": {
+          "StreamViewType": "NEW_AND_OLD_IMAGES"
+        },
+        "TimeToLiveSpecification": {
+          "AttributeName": "ExpiresAt",
+          "Enabled": true
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "VirtualWaitingRoom"
+          }
+        ]
       }
-    ]
+    }
   }
 }
