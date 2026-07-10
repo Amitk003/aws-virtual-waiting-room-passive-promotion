@@ -12,9 +12,12 @@ export interface JwtPayload {
 }
 
 let cachedSigningKey: any = null;
+let cachedKid: string = '';
 
-async function getSigningKey(secretId: string): Promise<any> {
-  if (cachedSigningKey) return cachedSigningKey;
+async function getSigningKey(secretId: string): Promise<{ key: any; kid: string }> {
+  if (cachedSigningKey && cachedKid) {
+    return { key: cachedSigningKey, kid: cachedKid };
+  }
 
   const result = await secretsManager.send(new GetSecretValueCommand({
     SecretId: secretId,
@@ -22,25 +25,25 @@ async function getSigningKey(secretId: string): Promise<any> {
 
   const secret = JSON.parse(result.SecretString!);
   cachedSigningKey = await importPKCS8(secret.privateKey, 'ES256');
-  return cachedSigningKey;
+  cachedKid = secret.kid || 'vwr-v1';
+  return { key: cachedSigningKey, kid: cachedKid };
 }
 
-const KEY_ID = 'vwr-v1';
-
 // Signs a JWT using a locally cached ECC P-256 key.
-// The key is fetched from Secrets Manager once at cold start and cached
-// in memory. No KMS calls happen in the hot path.
+// The kid is read dynamically from the secret payload, enabling zero-code
+// key rotation: just run scripts/rotate-key.js and the next cold start
+// picks up the new kid automatically.
 export async function signJwt(
   payload: JwtPayload,
   signingSecretId: string
 ): Promise<string> {
-  const signingKey = await getSigningKey(signingSecretId);
+  const { key, kid } = await getSigningKey(signingSecretId);
 
   const token = await new SignJWT({ ...payload })
-    .setProtectedHeader({ alg: 'ES256', typ: 'JWT', kid: KEY_ID })
+    .setProtectedHeader({ alg: 'ES256', typ: 'JWT', kid })
     .setIssuedAt(payload.iat)
     .setExpirationTime(payload.exp)
-    .sign(signingKey);
+    .sign(key);
 
   return token;
 }

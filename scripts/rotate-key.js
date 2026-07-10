@@ -1,16 +1,14 @@
 /**
  * Rotates the JWT signing key in Secrets Manager.
  * Generates a new ECC P-256 key pair and updates the kid version.
+ * The kid is read dynamically from the secret by the Ingestion Lambda,
+ * so no code update or redeploy is needed.
  *
  * Usage: node scripts/rotate-key.js <secret-name> <new-kid> [region]
  * Example: node scripts/rotate-key.js JwtSigningSecret vwr-v2 us-east-1
- *
- * After rotation, the kid header in new JWTs will reference the new version.
- * Both old and new keys can coexist during the transition period (JWTs
- * issued before rotation are still valid until they expire naturally).
  */
 
-import { crypto } from 'node:crypto';
+import { generateKeyPairSync } from 'node:crypto';
 import { SecretsManagerClient, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 
 const secretName = process.argv[2];
@@ -23,7 +21,7 @@ if (!secretName || !newKid) {
   process.exit(1);
 }
 
-const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', {
+const { privateKey, publicKey } = generateKeyPairSync('ec', {
   namedCurve: 'P-256',
   privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
   publicKeyEncoding: { type: 'spki', format: 'pem' },
@@ -44,5 +42,4 @@ await client.send(new PutSecretValueCommand({
 
 console.log(`Key rotated in Secrets Manager: ${secretName}`);
 console.log(`New key ID: ${newKid}`);
-console.log(`\nIMPORTANT: Update the KEY_ID constant in services/ingestion/src/jwt.ts`);
-console.log(`and any verifier services to match the new kid: "${newKid}"`);
+console.log('Ingestion Lambda will pick up the new kid on next cold start (no redeploy needed).');

@@ -13,7 +13,6 @@ import { DynamoDBClient, UpdateTableCommand, DescribeTableCommand } from '@aws-s
 
 const tableName = process.argv[2];
 const mode = process.argv[3];
-const region = process.argv[4] || 'us-east-1';
 
 if (!tableName || !mode) {
   console.error('Usage: node scripts/prewarm-table.js <table-name> provisioned <wcu> <rcu> [region]');
@@ -21,16 +20,19 @@ if (!tableName || !mode) {
   process.exit(1);
 }
 
-const client = new DynamoDBClient({ region });
+let region = 'us-east-1';
 
 if (mode === 'provisioned') {
   const wcu = parseInt(process.argv[4]);
   const rcu = parseInt(process.argv[5]);
+  region = process.argv[6] || 'us-east-1';
 
   if (!wcu || !rcu) {
     console.error('Provisioned mode requires WCU and RCU values');
     process.exit(1);
   }
+
+  const client = new DynamoDBClient({ region });
 
   await client.send(new UpdateTableCommand({
     TableName: tableName,
@@ -42,9 +44,11 @@ if (mode === 'provisioned') {
   }));
 
   console.log(`Switched ${tableName} to PROVISIONED (WCU: ${wcu}, RCU: ${rcu})`);
-}
+} else if (mode === 'pay-per-request') {
+  region = process.argv[4] || 'us-east-1';
 
-if (mode === 'pay-per-request') {
+  const client = new DynamoDBClient({ region });
+
   await client.send(new UpdateTableCommand({
     TableName: tableName,
     BillingMode: 'PAY_PER_REQUEST',
@@ -54,9 +58,10 @@ if (mode === 'pay-per-request') {
 }
 
 // Wait for update to complete
+const waitClient = new DynamoDBClient({ region });
 let status;
 do {
-  const desc = await client.send(new DescribeTableCommand({ TableName: tableName }));
+  const desc = await waitClient.send(new DescribeTableCommand({ TableName: tableName }));
   status = desc.Table?.TableStatus;
   if (status === 'ACTIVE') break;
   console.log(`Waiting for table update... (${status})`);
