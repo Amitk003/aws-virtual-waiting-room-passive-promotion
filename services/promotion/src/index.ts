@@ -97,6 +97,7 @@ export async function handler(): Promise<void> {
 
     let slotsFilled = 0;
     let newWatermarkSec = currentWatermarkSec;
+    let tieBreakerThreshold: number | null = null;
 
     for (const bucket of densityBuckets) {
       if (bucket.bucketTs <= currentWatermarkSec) continue;
@@ -105,9 +106,21 @@ export async function handler(): Promise<void> {
       if (remaining <= 0) break;
 
       const toAdmit = Math.min(bucket.count, remaining);
-      slotsFilled += toAdmit;
 
-      if (slotsFilled > 0 && bucket.bucketTs > newWatermarkSec) {
+      if (toAdmit < bucket.count) {
+        // Partial bucket: set tie-breaker threshold so only a fraction
+        // of users in this second are eligible to claim a slot.
+        // hash(fanId) % 100 < TieBreakerThreshold gates admission.
+        tieBreakerThreshold = Math.ceil((toAdmit / bucket.count) * 100);
+        if (tieBreakerThreshold < 1) tieBreakerThreshold = 1;
+        if (tieBreakerThreshold > 99) tieBreakerThreshold = 99;
+        newWatermarkSec = bucket.bucketTs;
+        slotsFilled += toAdmit;
+        break;
+      }
+
+      slotsFilled += toAdmit;
+      if (bucket.bucketTs > newWatermarkSec) {
         newWatermarkSec = bucket.bucketTs;
       }
 
@@ -116,21 +129,30 @@ export async function handler(): Promise<void> {
 
     const newWatermarkMs = newWatermarkSec * 1000;
     if (newWatermarkMs > admittedUntilTimestamp) {
+      let updateExpression = 'SET AdmittedUntilTimestamp = :newWatermark';
+      const expressionAttributeValues: Record<string, any> = {
+        ':newWatermark': { N: String(newWatermarkMs) },
+      };
+
+      if (tieBreakerThreshold !== null) {
+        updateExpression += ', TieBreakerThreshold = :threshold';
+        expressionAttributeValues[':threshold'] = { N: String(tieBreakerThreshold) };
+      }
+
       await ddb.send(new UpdateItemCommand({
         TableName: TABLE_NAME,
         Key: {
           PK: { S: `EVENT#${EVENT_ID}#METADATA` },
           SK: { S: 'METADATA' },
         },
-        UpdateExpression: 'SET AdmittedUntilTimestamp = :newWatermark',
+        UpdateExpression: updateExpression,
         ConditionExpression: 'attribute_not_exists(AdmittedUntilTimestamp) OR AdmittedUntilTimestamp < :newWatermark',
-        ExpressionAttributeValues: {
-          ':newWatermark': { N: String(newWatermarkMs) },
-        },
+        ExpressionAttributeValues: expressionAttributeValues,
       }));
 
+      const thresholdMsg = tieBreakerThreshold !== null ? `, threshold=${tieBreakerThreshold}%` : '';
       console.log(
-        `Promoted ${slotsFilled} users into ${freeSlots} slots. Watermark: ${admittedUntilTimestamp} → ${newWatermarkMs}`
+        `Promoted ${slotsFilled} users into ${freeSlots} slots. Watermark: ${admittedUntilTimestamp} → ${newWatermarkMs}${thresholdMsg}`
       );
     }
 

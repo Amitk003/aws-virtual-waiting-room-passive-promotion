@@ -16,6 +16,7 @@ const CACHE_TTL_MS = 2000;
 interface CachedState {
   timestamp: number;
   admittedUntilTimestamp: number;
+  tieBreakerThreshold: number;
   activePurchaserCount: number;
   densityBuckets: DensityBucket[];
 }
@@ -89,7 +90,7 @@ async function loadState(eventId: string): Promise<CachedState> {
         PK: { S: `EVENT#${eventId}#METADATA` },
         SK: { S: 'METADATA' },
       },
-      ProjectionExpression: 'AdmittedUntilTimestamp, ActivePurchaserCount',
+      ProjectionExpression: 'AdmittedUntilTimestamp, ActivePurchaserCount, TieBreakerThreshold',
     })),
     queryDensityShards(eventId),
   ]);
@@ -97,6 +98,7 @@ async function loadState(eventId: string): Promise<CachedState> {
   const state: CachedState = {
     timestamp: now,
     admittedUntilTimestamp: Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0),
+    tieBreakerThreshold: Number(globalState.Item?.TieBreakerThreshold?.N || 100),
     activePurchaserCount: Number(globalState.Item?.ActivePurchaserCount?.N || 0),
     densityBuckets,
   };
@@ -130,6 +132,29 @@ function estimateWaitSeconds(
   return Math.ceil(queuePosition / completionRatePerSec);
 }
 
+function hashCodeFanId(fanId: string): number {
+  let hash = 0;
+  for (let i = 0; i < fanId.length; i++) {
+    const char = fanId.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+function isAdmitted(
+  entryTimestamp: number,
+  admittedUntilTimestamp: number,
+  fanId: string,
+  tieBreakerThreshold: number
+): boolean {
+  if (entryTimestamp < admittedUntilTimestamp) return true;
+  if (entryTimestamp === admittedUntilTimestamp) {
+    return hashCodeFanId(fanId) % 100 < tieBreakerThreshold;
+  }
+  return false;
+}
+
 function extractEventId(path: string): string | null {
   const parts = path.split('/');
   const idx = parts.indexOf('event');
@@ -156,9 +181,9 @@ export async function handler(
     const eventId = extractEventId(event.rawPath) || EVENT_ID;
 
     const state = await loadState(eventId);
-    const isAdmitted = jwtPayload.entryTimestamp <= state.admittedUntilTimestamp;
+    const admitted = isAdmitted(jwtPayload.entryTimestamp, state.admittedUntilTimestamp, jwtPayload.fanId, state.tieBreakerThreshold);
 
-    if (isAdmitted) {
+    if (admitted) {
       return {
         statusCode: 200,
         headers: { 'content-type': 'application/json' },
