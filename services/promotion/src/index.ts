@@ -1,7 +1,13 @@
 import { DynamoDBClient, GetItemCommand, QueryCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 
+function requireEnv(name: string): string {
+  const val = process.env[name];
+  if (!val) throw new Error(`Missing required environment variable: ${name}`);
+  return val;
+}
+
 const ddb = new DynamoDBClient();
-const TABLE_NAME = process.env.TABLE_NAME!;
+const TABLE_NAME = requireEnv('TABLE_NAME');
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const MAX_SLOTS = 1000;
 const CACHE_TTL_MS = 2000;

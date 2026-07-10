@@ -1,7 +1,8 @@
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
-import { jwtVerify, importSPKI, decodeProtectedHeader } from 'jose';
+import { jwtVerify, importSPKI } from 'jose';
 
 const secretsManager = new SecretsManagerClient();
+const KEY_CACHE_TTL_MS = 60000;
 
 export interface JwtPayload {
   fanId: string;
@@ -11,13 +12,11 @@ export interface JwtPayload {
   exp: number;
 }
 
-let cachedPublicKey: any = null;
-let cachedKid: string = '';
+let cachedKey: { key: any; kid: string; cachedAt: number } | null = null;
 
-async function getPublicKey(secretId: string, targetKid?: string): Promise<any> {
-  // Return cached key if we have one and the token's kid matches
-  if (cachedPublicKey && (!targetKid || targetKid === cachedKid)) {
-    return cachedPublicKey;
+async function getPublicKey(secretId: string): Promise<{ key: any; kid: string }> {
+  if (cachedKey && Date.now() - cachedKey.cachedAt < KEY_CACHE_TTL_MS) {
+    return cachedKey;
   }
 
   const result = await secretsManager.send(new GetSecretValueCommand({
@@ -25,23 +24,19 @@ async function getPublicKey(secretId: string, targetKid?: string): Promise<any> 
   }));
 
   const secret = JSON.parse(result.SecretString!);
-  cachedPublicKey = await importSPKI(secret.publicKey, 'ES256');
-  cachedKid = secret.kid || 'vwr-v1';
-  return cachedPublicKey;
+  const key = await importSPKI(secret.publicKey, 'ES256');
+  const kid = secret.kid || 'vwr-v1';
+  cachedKey = { key, kid, cachedAt: Date.now() };
+  return cachedKey;
 }
 
-// Verifies a JWT and returns the payload. Throws on invalid/expired tokens.
-// Automatically detects key rotation by comparing the token's kid against
-// the cached public key's kid. If they differ, the public key is re-fetched
-// from Secrets Manager, providing zero-downtime rotation.
 export async function verifyJwt(
   token: string,
   signingSecretId: string
 ): Promise<JwtPayload> {
-  const { kid } = decodeProtectedHeader(token);
-  const publicKey = await getPublicKey(signingSecretId, kid);
+  const { key } = await getPublicKey(signingSecretId);
 
-  const { payload } = await jwtVerify(token, publicKey, {
+  const { payload } = await jwtVerify(token, key, {
     algorithms: ['ES256'],
   });
 

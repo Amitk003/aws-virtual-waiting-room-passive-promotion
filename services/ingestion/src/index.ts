@@ -3,10 +3,16 @@ import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getShardId } from './shard.js';
 import { signJwt, JwtPayload } from './jwt.js';
 
+function requireEnv(name: string): string {
+  const val = process.env[name];
+  if (!val) throw new Error(`Missing required environment variable: ${name}`);
+  return val;
+}
+
 const ddb = new DynamoDBClient();
 
-const TABLE_NAME = process.env.TABLE_NAME!;
-const SIGNING_SECRET_ID = process.env.SIGNING_SECRET_ID!;
+const TABLE_NAME = requireEnv('TABLE_NAME');
+const SIGNING_SECRET_ID = requireEnv('SIGNING_SECRET_ID');
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const JWT_EXPIRY_SECONDS = 3600; // 1 hour
 const QUEUE_TTL_SECONDS = 86400; // 24 hours — data persists beyond JWT expiry

@@ -4,10 +4,16 @@ import { createHmac } from 'node:crypto';
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { verifyJwt } from './jwt.js';
 
+function requireEnv(name: string): string {
+  const val = process.env[name];
+  if (!val) throw new Error(`Missing required environment variable: ${name}`);
+  return val;
+}
+
 const ddb = new DynamoDBClient();
 const sm = new SecretsManagerClient();
-const TABLE_NAME = process.env.TABLE_NAME!;
-const SIGNING_SECRET_ID = process.env.SIGNING_SECRET_ID!;
+const TABLE_NAME = requireEnv('TABLE_NAME');
+const SIGNING_SECRET_ID = requireEnv('SIGNING_SECRET_ID');
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const SESSION_TTL_SECONDS = 300; // 5 min
 

@@ -1,8 +1,14 @@
 import { DynamoDBClient, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { DynamoDBStreamEvent, DynamoDBStreamHandler } from 'aws-lambda';
 
+function requireEnv(name: string): string {
+  const val = process.env[name];
+  if (!val) throw new Error(`Missing required environment variable: ${name}`);
+  return val;
+}
+
 const ddb = new DynamoDBClient();
-const TABLE_NAME = process.env.TABLE_NAME!;
+const TABLE_NAME = requireEnv('TABLE_NAME');
 
 function extractEventId(pk: string): string | null {
   const parts = pk.split('#');
