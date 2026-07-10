@@ -6,6 +6,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigwIntegrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as path from 'node:path';
 
 export class InfraStack extends cdk.Stack {
@@ -73,6 +74,38 @@ export class InfraStack extends cdk.Stack {
     //   version: ingestionVersion,
     //   provisionedConcurrentExecutions: 5000,
     // });
+
+    // --- Stream Aggregator Lambda ---
+    // Processes DynamoDB Stream events for:
+    // 1. QueueTicket INSERT: aggregates per-second density counts (TimeDensityMap)
+    // 2. SessionItem REMOVE (TTL): decrements ActivePurchaserCount
+
+    const aggregatorFn = new lambdaNodejs.NodejsFunction(this, 'StreamAggregator', {
+      entry: path.join(projectRoot, 'services', 'aggregator', 'src', 'index.ts'),
+      projectRoot,
+      depsLockFilePath: path.join(projectRoot, 'services', 'aggregator', 'package-lock.json'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(60),
+      environment: {
+        TABLE_NAME: table.tableName,
+      },
+      bundling: {
+        target: 'es2022',
+        format: lambdaNodejs.OutputFormat.ESM,
+        sourceMap: true,
+      },
+    });
+
+    table.grantWriteData(aggregatorFn);
+
+    aggregatorFn.addEventSource(new lambdaEventSources.DynamoEventSource(table, {
+      startingPosition: lambda.StartingPosition.LATEST,
+      batchSize: 100,
+      retryAttempts: 3,
+    }));
 
     // --- API Gateway HTTP API ---
 

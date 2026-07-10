@@ -48,7 +48,31 @@ A single item that tracks the overall queue state.
 
 **Purpose**: This is the "watermark" item. It tells the system how far the admission window has moved. Users check their timestamp against `AdmittedUntilTimestamp` to know if they can enter.
 
-### 3. SessionItem
+### 3. DensityBucket
+
+Stores the count of users who joined in each 1-second time bucket. Written by the
+Stream Aggregator which accumulates counts per batch and flushes via atomic ADD.
+Shard-level pre-aggregation reduces GlobalState updates from millions to ~2000/sec.
+
+| Attribute | Type | Example | Notes |
+|-----------|------|---------|-------|
+| PK | String | `EVENT#match2026#DENSITY#SHARD#7` | Hash of bucket timestamp mod 20 (scatters writes) |
+| SK | String | `BUCKET#1719997200` | Timestamp in seconds (rounded down) |
+| Count | Number | `4521` | Number of users who joined in this second |
+
+**Why separate items instead of a JSON map on GlobalState**: Atomic updates via
+`ADD Count :inc` are safe across concurrent aggregator instances. A JSON string
+on GlobalState would require read-modify-write and risk race conditions.
+
+**Sharded PK**: The PK is sharded across 20 partitions (`#SHARD#<1-20>`) using
+`bucketTimestamp % 20 + 1`. This scatters writes evenly and keeps each partition
+well below the 1000 WCU cap. The read path queries all 20 shards in parallel and
+merges the results in memory.
+
+**Pruning**: After `AdmittedUntilTimestamp` advances past a bucket, the bucket
+data is no longer needed. A periodic task can delete old DensityBucket items.
+
+### 4. SessionItem
 
 Represents one user's active checkout session. Created dynamically when a user enters checkout.
 
@@ -62,6 +86,24 @@ Represents one user's active checkout session. Created dynamically when a user e
 | ExpiresAt | Number | `1720083605` | TTL expiry (5 min lease). Auto-deletes on abandon. |
 
 **Purpose**: Controls how many users can be in the checkout process at the same time. Max 1000. TTL auto-clears abandoned sessions. Stream triggers decrement `ActivePurchaserCount` on cleanup.
+
+## Density Map
+
+The old TimeDensityMap was a JSON array on the GlobalState item. In this design,
+it is replaced by individual DensityBucket items (one per 1-second bucket).
+The read path queries all DensityBucket items for the event to build the density
+map. With at most 3600 items for a typical event, this is fast and cost-effective.
+
+### Stream Aggregator Flow
+
+1. DynamoDB Stream delivers QueueTicket INSERT events per shard
+2. Aggregator Lambda extracts `entryTimestamp`, rounds to 1-second buckets
+3. Accumulates counts per bucket in memory across a batch (up to 100 records)
+4. Flushes via `UpdateItem ADD Count :inc` on the DensityBucket item
+5. TTL REMOVE events on SessionItem decrement `ActivePurchaserCount` on GlobalState
+
+This is a shard-level pre-aggregation pattern. Each DynamoDB Stream shard has its
+own Lambda instance, so aggregation is naturally parallelized.
 
 ## Global Secondary Index: SessionMetadataIndex
 
@@ -94,11 +136,10 @@ Represents one user's active checkout session. Created dynamically when a user e
 - The Stream Aggregator detects the TTL REMOVE event and decrements `ActivePurchaserCount`
 - A reconciliation Lambda runs every 5 minutes to correct counter drift
 
-**Density Map Pruning**
-- Timestamp buckets older than `AdmittedUntilTimestamp` are removed by the Stream Aggregator
-- This keeps the `TimeDensityMap` item size under 10 KB
-- Prevents hitting the 400 KB DynamoDB item size limit
-- Also makes reads and writes cheaper since DynamoDB charges by item size
+**Density Bucket Pruning**
+- DensityBucket items for timestamps before `AdmittedUntilTimestamp` can be deleted
+- A periodic task (reconciliation Lambda) removes old buckets to reduce storage
+- With at most 3600 buckets per event, storage is negligible
 
 **Entity Overloading**
 - All entity types live in the same table

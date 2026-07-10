@@ -233,3 +233,37 @@ Reason:
 - The `kid` header derived from the KMS key ID required verifiers to reference KMS, but the actual signing key was the Secrets Manager one
 - Removing KMS entirely means one key pair stored in Secrets Manager, used for both signing (private key) and verification (public key)
 - Eliminates the risk of key mismatch and removes a dependency that was only used for deriving a key ID
+
+---
+
+## Branch: feature/phase-4-streams-aggregator
+
+### 2026-07-10 - Streams Aggregator integration
+
+Commands ran:
+- Created `services/aggregator` project directory
+- `npm install` in services/aggregator/ - Installed deps (31 packages)
+- `npx tsc --noEmit` - Verified TypeScript compilation
+- `npx cdk synth` - Generated CloudFormation (aggregator bundle 2.6kb)
+
+Files created:
+- `services/aggregator/package.json` - Node.js project config
+- `services/aggregator/tsconfig.json` - TypeScript config
+- `services/aggregator/src/index.ts` - Streams Aggregator Lambda handler
+
+Files modified:
+- `infra/lib/infra-stack.ts` - Added StreamAggregator Lambda with DynamoDB event source
+- `docs/data-model-spec.md` - Added DensityBucket entity, updated density map section
+- `docs/access-patterns.md` - Added Pattern 10 (Get Time Density Map), updated Patterns 2 and 3
+- `docs/iac-setup.md` - Added aggregator notes to production considerations
+- `docs/dev-log.md` - This entry
+
+New stack resources:
+- Lambda: StreamAggregator (Node.js 22, ARM64, 256MB, 60s timeout)
+- Event Source Mapping: DynamoDB Stream (batch size 100, latest position, 3 retries)
+- IAM: Auto-created role with DynamoDB write + stream read permissions
+
+Aggregator design:
+- QueueTicket INSERT events: Extracts eventId and entryTimestamp, accumulates per-second count per bucket in memory, flushes via atomic `ADD Count :inc` on DensityBucket items (`EVENT#<id>#DENSITY`, SK = `BUCKET#<ts>`)
+- SessionItem REMOVE (TTL) events: Decrements `ActivePurchaserCount` on GlobalState via `ADD ActivePurchaserCount :dec`
+- DensityBucket replaces the old TimeDensityMap JSON attribute on GlobalState, enabling safe concurrent writes from multiple shard aggregators

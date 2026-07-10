@@ -30,7 +30,7 @@ This folder contains the AWS CDK v2 (TypeScript) project that defines all cloud 
 
 ### IAM Roles
 
-IAM roles are NOT defined in this stack. Lambda functions in later phases will create their own execution roles automatically via CDK's `lambda.Function`. Permissions are granted inline with calls like `table.grantWriteData(fn)` and `signingSecret.grantRead(fn)`. This removes boilerplate and follows CDK best practices.
+IAM roles are NOT defined in this stack. Lambda functions in later phases will create their own execution roles automatically via CDK's `lambda.Function`. Permissions are granted inline with calls like `table.grantWriteData(fn)`, `signingSecret.grantRead(fn)`, and `table.grantReadData(fn)` (for stream readers). This removes boilerplate and follows CDK best practices.
 
 ## Useful commands
 
@@ -57,4 +57,6 @@ This keeps the base template deployable without account limit issues.
 ## Production considerations
 
 - Secrets Manager secret removal policy: Change to RETAIN for production so the signing key is not destroyed on stack deletion
+- Stream Aggregator timeout: 60s (must be high enough to handle batch processing)
+- DynamoDB event source retry: 3 attempts, then records go to DLQ
 - Table name: A hardcoded table name can be added if needed, but auto-generated names prevent conflicts across environments
