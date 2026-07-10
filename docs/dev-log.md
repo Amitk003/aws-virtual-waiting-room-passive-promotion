@@ -120,13 +120,29 @@ Files created:
 
 Stack resources defined:
 - DynamoDB Table: VirtualWaitingRoom (PAY_PER_REQUEST, PK/SK, Streams, TTL, GSI)
-- KMS Key: Asymmetric ECC_NIST_P256 for JWT signing (with alias)
-- IAM Roles: 6 roles (Ingestion, Aggregator, Status, Slot, Promotion, Reconciliation)
+- KMS Key: Asymmetric ECC_NIST_P256 for JWT signing (with dynamic alias)
+- IAM Roles: None (removed - Lambda functions in later phases will auto-create their own)
 
 Notes:
 - Table uses PAY_PER_REQUEST to avoid account limit errors on deployment
 - Pre-warming to 1M WCU will be done via a separate CLI script before the event
 - CDK stack produces AWS::DynamoDB::Table (not GlobalTable) for NoSQL Workbench compatibility
-- All IAM roles follow least-privilege principles
-- KMS key is asymmetric (ECC_P256) so public key can be cached at edge for offline JWT verification
-- 6 roles defined to match the Lambda functions planned in future phases
+- KMS key has removalPolicy: DESTROY for safe dev cleanup (change to RETAIN for production)
+- KMS pending window set to 7 days (minimum allowed)
+
+### 2026-07-10 - Code review fixes: removed IAM roles, hardcoded names, added KMS cleanup
+
+Commands ran:
+- Updated `infra/lib/infra-stack.ts` - Removed 6 manual IAM roles (~60 lines removed), removed hardcoded tableName, added removalPolicy: DESTROY on KMS key, added dynamic alias suffix
+- Updated `docs/iac-setup.md` - Reflected all changes
+
+Reason for changes:
+- IAM roles were pure boilerplate; CDK's lambda.Function auto-creates them with inline grants
+- Hardcoded table name would conflict in multi-environment deployments
+- KMS key needed removalPolicy: DESTROY for clean `cdk destroy` during development
+- KMS alias needed dynamic suffix to prevent conflicts on redeploy
+
+Files changed:
+- `infra/lib/infra-stack.ts` - Major cleanup
+- `docs/iac-setup.md` - Updated to reflect removal of IAM roles
+- `docs/dev-log.md` - This entry
