@@ -54,11 +54,11 @@ Because the incoming requests are uniformly randomized across 2,000 logical part
 A foundational requirement of a virtual waiting room is the perception and reality of absolute fairness1. Ensuring this fairness requires pristine timestamping and a mechanism to prevent malicious actors from gaming their queue position. In distributed systems, this is notoriously difficult due to clock skew—the phenomenon where different physical machines record slightly different times due to oscillator drift18.  
 If the clock on Application Server A is 500 milliseconds behind the clock on Application Server B, a fan hitting Server B could be unfairly penalized, violating the strict FIFO requirement5. Traditional synchronization protocols like the Network Time Protocol (NTP) often suffer from asymmetric network delays, leading to unpredictable clock synchronization19.
 
-### **Integrating AWS Time Sync Service for Microsecond Accuracy**
+### **Timestamps for Entry Ordering**
 
-To eliminate clock skew, the ingestion compute nodes must utilize the **AWS Time Sync Service**19. Accessible via the link-local IP 169.254.169.123, this service utilizes a fleet of redundant satellite-connected Global Positioning System (GPS) receivers and atomic reference clocks to deliver highly accurate time to Amazon EC2 instances and containerized workloads20.  
-For the most extreme precision, the architecture mandates the use of instances supporting the Precision Hardware Clock (PHC) feature within the AWS Nitro System. This bypasses standard software-based NTP daemons, allowing the instances to query the hypervisor directly, bounding clock uncertainty to under 100 microseconds19.  
-When a fan arrives, the ingestion API retrieves this highly precise UTC timestamp in milliseconds and assigns it as the EntryTimestamp. Because the maximum clock skew across the entire ingestion fleet is bounded to microseconds, strict chronological ordering is preserved19.
+When a fan arrives, the ingestion Lambda records the arrival timestamp using `Date.now()` (millisecond precision from the system clock). Lambda execution environments run on AWS Nitro instances where system clock drift is minimal and bounded by the hypervisor, making external time sync services unnecessary. The entry timestamp is embedded in the JWT payload and cryptographically signed, preventing client-side tampering.
+
+Tie-breaking at second granularity uses a deterministic hash of the fan ID, ensuring fairness for users who arrive within the same second. This avoids the complexity of microsecond-level synchronization while maintaining FIFO ordering at second boundaries.
 
 ### **Preventing Queue-Position Gaming via Cryptographic JWTs**
 
@@ -131,9 +131,11 @@ Because the system utilizes Passive Promotion via a global watermark, the only d
 
 ### **Queue Position and Estimated Wait Time (EWT) Calculation**
 
-Providing accurate queue positions without scanning the database is achieved by leveraging the TimeDensityMap included in the cached GlobalState response1.  
-When the client browser receives the JSON payload, it contains the array of timestamps and arrival counts. The client-side application calculates its estimated position by subtracting the sum of all density buckets prior to its own securely signed EntryTimestamp from the TotalQueued count. Because estimated queue positions significantly reduce backend read traffic while still providing a highly responsive user experience, the system achieves massive cost savings1.  
-Furthermore, the Estimated Wait Time (EWT) is calculated dynamically by the client. By measuring the rate at which the AdmittedUntilTimestamp watermark is moving forward over successive polling intervals, the client applies a simple moving average algorithm to predict when the watermark will cross its specific EntryTimestamp.
+Queue position and EWT are computed server-side by the status polling Lambda using the density map.  
+Queue position is the sum of all density bucket counts whose timestamp is earlier than the user's EntryTimestamp.  
+EWT is estimated as `queuePosition / max(activePurchaserCount * completionRateFactor, 1)`, where `completionRateFactor` defaults to 0.01 (configurable via `COMPLETION_RATE_FACTOR` environment variable). This assumes each active purchaser completes at a steady rate proportional to the number of active sessions.
+
+Because the cached GlobalState (2s TTL at the edge) contains the density map, ActivePurchaserCount, and watermark, the status Lambda can serve millions of polling requests with fewer than 10 DynamoDB reads per second.
 
 ## **Dynamic Capacity Regulation: The 1,000 Active User Stretch Goal**
 
@@ -205,7 +207,7 @@ The initial phase focuses entirely on data model correctness. Engineers must imp
 ### **Phase 2: Infrastructure as Code (IaC) Deployment**
 
 Deploying a system meant for 10 million concurrent connections requires strict reliance on Infrastructure as Code, utilizing AWS Serverless Application Model (SAM) or the AWS Cloud Development Kit (CDK). The VirtualWaitingRoom DynamoDB table must be provisioned with high initial Write Capacity Units (WCUs) to survive the simulated stampede, avoiding the cold-start limitations of On-Demand billing mode8.  
-The ingestion tier requires deploying an Amazon API Gateway HTTP API integrated with an AWS Lambda function. Crucially, the execution environment must be configured to query the AWS Time Sync Service via the link-local address to assign the hyper-accurate EntryTimestamp19. A cryptographic signing library must be integrated into this Lambda to generate the anti-gaming JWT. Finally, an Amazon CloudFront distribution must be deployed with strict cache policies to absorb the polling queries31.
+The ingestion tier requires deploying an Amazon API Gateway HTTP API integrated with an AWS Lambda function. The Lambda assigns the EntryTimestamp via Date.now() (Nitro system clock bounded to sub-millisecond drift). A cryptographic signing library (jose) is integrated into this Lambda to generate the anti-gaming JWT. An Amazon CloudFront distribution is deployed with strict cache policies to absorb the polling queries31.
 
 ### **Phase 3: Aggregation and Promotion Engine Implementation**
 
@@ -220,7 +222,7 @@ The cryptographic validation must be tested by attempting to submit forged JWTs 
 ## **Conclusion**
 
 The challenge of fairly queuing up to 10 million concurrent fans within seconds dictates a total departure from conventional, row-locking queue patterns. Standard active-promotion queues crumble under the load of massive secondary write spikes. The architecture detailed in this report resolves the initial "stampede" problem through mathematically sound, aggressive write sharding, effectively turning 1,000,000 writes per second into manageable, evenly distributed streams across thousands of logical partitions8.  
-More importantly, by introducing the **Zero-Write Passive Promotion** model via Time-Density Watermarking, the system entirely bypasses the fundamental bottleneck of traditional DynamoDB queuing. It delegates the computationally heavy lifting of eligibility verification to highly scalable CloudFront edge caches and client-side deterministic logic. Combined with the AWS Time Sync Service to guarantee strict chronological fairness and prevent gaming20, along with an active slot monitoring loop to sustain exact purchasing throughput, this design provides a uniquely robust and cost-effective solution. It is an architecture capable of surviving the most extreme ticketing traffic loads imaginable without buckling, ensuring fairness, maintaining order, and preserving the integrity of the downstream systems.
+More importantly, by introducing the **Zero-Write Passive Promotion** model via Time-Density Watermarking, the system entirely bypasses the fundamental bottleneck of traditional DynamoDB queuing. It delegates the computationally heavy lifting of eligibility verification to highly scalable CloudFront edge caches and client-side deterministic logic. Combined with JWT-signed entry timestamps to guarantee chronological fairness and prevent gaming, along with an active slot monitoring loop to sustain exact purchasing throughput, this design provides a uniquely robust and cost-effective solution. It is an architecture capable of surviving the most extreme ticketing traffic loads imaginable without buckling, ensuring fairness, maintaining order, and preserving the integrity of the downstream systems.
 
 #### **Works cited**
 

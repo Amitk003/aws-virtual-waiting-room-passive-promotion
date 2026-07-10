@@ -10,6 +10,7 @@ const EVENT_ID = process.env.EVENT_ID || 'default-event';
 // identical for all users in the same event. This avoids hammering
 // DynamoDB with reads.
 const CACHE_TTL_MS = 2000;
+const COMPLETION_RATE_FACTOR = parseFloat(process.env.COMPLETION_RATE_FACTOR || '0.01');
 
 interface CachedState {
   timestamp: number;
@@ -123,7 +124,7 @@ function estimateWaitSeconds(
   activePurchaserCount: number
 ): number | null {
   if (queuePosition <= 0) return 0;
-  const completionRatePerSec = Math.max(activePurchaserCount * 0.01, 1);
+  const completionRatePerSec = Math.max(activePurchaserCount * COMPLETION_RATE_FACTOR, 1);
   return Math.ceil(queuePosition / completionRatePerSec);
 }
 

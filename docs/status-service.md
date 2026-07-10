@@ -57,9 +57,9 @@ The JWT is obtained from the ingestion endpoint (POST /join).
 3. Reads GlobalState (GetItem) for the event's `AdmittedUntilTimestamp` and `TieBreakerThreshold`
 4. Admission check uses tie-breaking: `hash(fanId) % 100 < TieBreakerThreshold` when entryTimestamp equals the watermark
 5. If admitted, returns immediately with `admitted: true`
-6. If waiting, queries the single DensityBucket PK (1 Query, not 20 parallel) for all per-second bucket counts
+6. If waiting, queries all 10 DensityBucket sub-partitions in parallel and merges the per-second bucket counts
 7. Calculates queue position = sum of counts in all buckets before user's timestamp
-8. Estimates wait time based on queue position and ActivePurchaserCount
+8. Estimates wait time as `queuePosition / max(activePurchaserCount * completionRateFactor, 1)`. The `completionRateFactor` (default 0.01, configurable via `COMPLETION_RATE_FACTOR` env var) models how many purchasers complete checkout per second for each active session.
 
 ## CloudFront CDN
 

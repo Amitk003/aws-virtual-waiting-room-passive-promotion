@@ -66,7 +66,7 @@ export async function handler(): Promise<void> {
   // advance the watermark multiple times per invocation.
   // Timeout is 5s, giving us ~4 iterations at 1s intervals.
   const startTime = Date.now();
-  const timeoutMs = 58000;
+  const timeoutMs = 59000;
   let iteration = 0;
 
   while (Date.now() - startTime < timeoutMs) {
