@@ -1,11 +1,14 @@
 /**
  * Switches the DynamoDB table between billing modes for event pre-warming.
  *
- * Before event: node scripts/prewarm-table.js <table-name> provisioned <wcu> <rcu> [region]
+ * The GSI (SessionMetadataIndex) stores only ~1000 active session items,
+ * so its WCU is set independently to a lower value than the main table.
+ *
+ * Before event: node scripts/prewarm-table.js <table-name> provisioned <wcu> <rcu> <gsi-wcu> [region]
  * After event:  node scripts/prewarm-table.js <table-name> pay-per-request [region]
  *
  * Examples:
- *   node scripts/prewarm-table.js VirtualWaitingRoom provisioned 1000000 50000 us-east-1
+ *   node scripts/prewarm-table.js VirtualWaitingRoom provisioned 1000000 50000 1000 us-east-1
  *   node scripts/prewarm-table.js VirtualWaitingRoom pay-per-request us-east-1
  */
 
@@ -25,7 +28,8 @@ let region = 'us-east-1';
 if (mode === 'provisioned') {
   const wcu = parseInt(process.argv[4]);
   const rcu = parseInt(process.argv[5]);
-  region = process.argv[6] || 'us-east-1';
+  const gsiWcu = parseInt(process.argv[6]) || 1000;
+  region = process.argv[7] || 'us-east-1';
 
   if (!wcu || !rcu) {
     console.error('Provisioned mode requires WCU and RCU values');
@@ -47,14 +51,14 @@ if (mode === 'provisioned') {
           IndexName: 'SessionMetadataIndex',
           ProvisionedThroughput: {
             ReadCapacityUnits: rcu,
-            WriteCapacityUnits: wcu,
+            WriteCapacityUnits: gsiWcu,
           },
         },
       },
     ],
   }));
 
-  console.log(`Switched ${tableName} to PROVISIONED (WCU: ${wcu}, RCU: ${rcu})`);
+  console.log(`Switched ${tableName} to PROVISIONED (WCU: ${wcu}, RCU: ${rcu}, GSI WCU: ${gsiWcu})`);
 } else if (mode === 'pay-per-request') {
   region = process.argv[4] || 'us-east-1';
 
