@@ -173,10 +173,14 @@ export async function handler(): Promise<void> {
         ExpressionAttributeValues: expressionAttributeValues,
       }));
 
-      const thresholdMsg = tieBreakerThreshold !== null ? `, threshold=${tieBreakerThreshold}%` : '';
-      console.log(
-        `Promoted ${slotsFilled} users into ${freeSlots} slots. Watermark: ${admittedUntilTimestamp} → ${newWatermarkMs}${thresholdMsg}`
-      );
+      console.log(JSON.stringify({
+        event: 'promotion',
+        slotsFilled,
+        freeSlots,
+        watermarkBefore: admittedUntilTimestamp,
+        watermarkAfter: newWatermarkMs,
+        threshold: tieBreakerThreshold ?? 100,
+      }));
     }
 
     await sleep(1000);

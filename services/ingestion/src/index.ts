@@ -174,7 +174,7 @@ export async function handler(
       }),
     };
   } catch (error: any) {
-    console.error('Ingestion error:', error);
+    console.error(JSON.stringify({ event: 'join_error', requestId, error: error.message }));
 
     return {
       statusCode: 500,

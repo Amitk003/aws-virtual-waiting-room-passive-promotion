@@ -117,7 +117,7 @@ export async function handler(
       }),
     };
   } catch (error: any) {
-    console.error('Status error:', error);
+    console.error(JSON.stringify({ event: 'status_error', requestId, error: error.message }));
     return {
       statusCode: 500,
       headers: baseHeaders,

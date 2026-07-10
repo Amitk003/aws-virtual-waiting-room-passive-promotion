@@ -25,7 +25,7 @@ async function correctCounter(eventId: string): Promise<void> {
   }));
 
   const validCount = result.Count ?? 0;
-  console.log(`Active session count for ${eventId}: ${validCount}`);
+  console.log(JSON.stringify({ event: 'reconciliation', eventId, activeSessions: validCount }));
 }
 
 export async function handler(): Promise<void> {

@@ -131,7 +131,7 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
       const reasons = err.CancellationReasons || [];
       if (reasons[0]?.Code === 'ConditionalCheckFailed') {
         // Batch was already processed by a prior invocation — safe to skip
-        console.log(`Skipping already-processed batch ${batchId}`);
+        console.log(JSON.stringify({ event: 'aggregator_skip', batchId }));
         return;
       }
     }

@@ -213,7 +213,7 @@ export async function handler(
             ':zero': { N: '0' },
           },
         }));
-        console.log(`Released slot for event=${eventId} fan=${fanId} requestId=${requestId}`);
+        console.log(JSON.stringify({ event: 'slot_released', requestId, eventId, fanId }));
       } catch (err: any) {
         if (err.name === 'ConditionalCheckFailedException') {
           // Session already deleted (completed, released, or TTL-expired)
@@ -247,7 +247,7 @@ export async function handler(
       };
     }
 
-    console.error('Slot handler error:', error);
+    console.error(JSON.stringify({ event: 'slot_error', requestId, error: error.message }));
     return {
       statusCode: 500,
       headers: baseHeaders,

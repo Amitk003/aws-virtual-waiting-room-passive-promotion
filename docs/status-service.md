@@ -1,6 +1,8 @@
 # Status Polling Service
 
-This service lets users check their queue position and admission status.
+This service returns the global waiting-room state (watermark, tiebreaker, density).
+Admission evaluation, queue position, and EWT are computed **client-side** by
+comparing the user's JWT (entryTimestamp, shardId) against the cached global state.
 
 ## Endpoint
 
@@ -8,82 +10,75 @@ This service lets users check their queue position and admission status.
 GET /api/v1/event/{eventId}/status
 ```
 
-### Headers
+No authentication required. The response is cached at the CloudFront edge with a
+**global cache key** (no Authorization header), achieving ~99.9999% cache hit rate.
 
-| Header | Value | Required |
-|--------|-------|----------|
-| Authorization | `Bearer <JWT>` | Yes |
-
-The JWT is obtained from the ingestion endpoint (POST /join).
-
-### Response (200 - Admitted)
+### Response (200)
 
 ```json
 {
-  "admitted": true,
-  "fanId": "fan_12345",
-  "entryTimestamp": 1719997000000,
   "admittedUntilTimestamp": 1719997202000,
-  "activePurchaserCount": 950
+  "tieBreakerThreshold": 100,
+  "densityBuckets": [
+    { "bucketTs": 1719997199, "count": 14820 },
+    { "bucketTs": 1719997200, "count": 15000 }
+  ]
 }
 ```
 
-### Response (200 - Waiting)
+| Field | Description |
+|-------|-------------|
+| `admittedUntilTimestamp` | Watermark in ms — users with entryTimestamp < this are fully admitted |
+| `tieBreakerThreshold` | 0-100 — users whose HMAC-tiebreaker value < this are admitted at the watermark boundary |
+| `densityBuckets` | Per-second density histogram for queue-position calculation |
 
-```json
-{
-  "admitted": false,
-  "fanId": "fan_12345",
-  "entryTimestamp": 1719997000000,
-  "admittedUntilTimestamp": 1719997202000,
-  "queuePosition": 4523,
-  "estimatedWaitSeconds": 75,
-  "activePurchaserCount": 950
+## Client-side admission algorithm
+
+```typescript
+const jwt = decodeJwt(token); // fanId, entryTimestamp, shardId
+const status = await fetch('/api/v1/event/{eventId}/status').then(r => r.json());
+
+const entrySec = Math.floor(jwt.entryTimestamp / 1000);
+const admittedSec = Math.floor(status.admittedUntilTimestamp / 1000);
+
+if (entrySec < admittedSec) {
+  // Fully admitted — call /claim
+} else if (entrySec === admittedSec) {
+  // Tiebreaker zone — call /claim, server decides
+} else {
+  // Waiting — estimate position from densityBuckets
 }
 ```
 
-### Response (401)
-
-```json
-{
-  "error": "Invalid or expired token"
-}
-```
-
-## How it works
-
-1. User sends their JWT in the Authorization header
-2. Lambda verifies the JWT locally using the cached public key from Secrets Manager
-3. Reads GlobalState (GetItem) for the event's `AdmittedUntilTimestamp` and `TieBreakerThreshold`
-4. Admission check uses tie-breaking: `hash(fanId) % 100 < TieBreakerThreshold` when entryTimestamp equals the watermark
-5. If admitted, returns immediately with `admitted: true`
-6. If waiting, queries all 10 DensityBucket sub-partitions in parallel and merges the per-second bucket counts
-7. Calculates queue position = sum of counts in all buckets before user's timestamp
-8. Estimates wait time as `queuePosition / max(activePurchaserCount * completionRateFactor, 1)`. The `completionRateFactor` (default 0.01, configurable via `COMPLETION_RATE_FACTOR` env var) models how many purchasers complete checkout per second for each active session.
+The HMAC tiebreaker value cannot be computed client-side (server holds the key).
+Client-side users at the watermark boundary must call /claim to learn their
+admission status.
 
 ## CloudFront CDN
 
-CloudFront sits in front of the API Gateway. The status endpoint is cached per-user
-using the Authorization header as part of the cache key. Cache TTL is 2 seconds
-(default) to 5 seconds (max). This dramatically reduces Lambda invocations during
-polling storms.
+CloudFront sits in front of API Gateway. The status endpoint uses a **global cache
+key** (no Authorization header). Cache TTL: 2s default, 5s max. All users share
+the same cached response, so 10M concurrent pollers result in ~2 Lambda invocations
+per second instead of millions.
 
 Clients should use the CloudFront URL (CdnUrl output from CDK) as their primary
-endpoint. It handles HTTPS termination, DDoS protection, and edge caching.
+endpoint.
 
-## JWT Verification
+## Rationale
 
-The public key is loaded from the same Secrets Manager secret that holds the private
-key. The kid header (vwr-v1) must match. Verification is done using the jose library
-with the ES256 algorithm.
+The original design performed per-user admission on the server, requiring JWT
+verification on every poll. This made the response uncacheable (Authorization
+header in cache key), causing 0% CDN hit rate and ~$40K/month Lambda costs for
+10M concurrent users. Moving admission logic to the client eliminates this
+bottleneck.
 
 ## Project structure
 
 ```
 services/status-api/
   src/
-    index.ts    - Lambda handler
-    jwt.ts      - JWT verification using public key from Secrets Manager
+    index.ts    - Lambda handler (global state, no JWT)
+    jwt.ts      - Unused (kept for reference)
   package.json
   tsconfig.json
 ```

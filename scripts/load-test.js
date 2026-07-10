@@ -42,22 +42,19 @@ export function setup() {
 }
 
 export default function (data) {
-  const res = http.get(`${BASE_URL}/api/v1/event/${EVENT_ID}/status`, {
-    headers: {
-      authorization: `Bearer ${data.token}`,
-    },
-  });
+  const res = http.get(`${BASE_URL}/api/v1/event/${EVENT_ID}/status`);
 
   check(res, {
     'status is 200': (r) => r.status === 200,
-    'response is valid JSON': (r) => {
+    'response has global state': (r) => {
       try {
         const body = r.json();
-        return body.admitted !== undefined && body.fanId !== undefined;
+        return body.admittedUntilTimestamp !== undefined && body.densityBuckets !== undefined;
       } catch {
         return false;
       }
     },
+    'no auth header needed': (r) => r.request.headers['Authorization'] === undefined,
     'fast response': (r) => r.timings.duration < 500,
   });
 
