@@ -141,45 +141,41 @@ Because the cached GlobalState (2s TTL at the edge) contains the density map, Ac
 
 The system continuously draws new batches of users from the waiting room to keep exactly 1,000 active checkout sessions, without waiting for all slots to empty.
 
-### **Dynamic Session Creation with TransactWriteItems**
+### **Dynamic Session Creation**
 
 When an admitted fan calls `POST /claim`, the Slot Handler:
 
 1. Reads `AdmittedUntilTimestamp` and `TieBreakerThreshold` from GlobalState to verify admission eligibility.
-2. Executes a single `TransactWriteItems` containing:
-   - **Put**: Creates a `SessionItem` (`PK = EVENT#<id>#SESSION#<fanId>`, `SK = SESSION`) with a 5-minute TTL.
-   - **Update**: Increments `ActivePurchaserCount` on GlobalState, conditioned on `ActivePurchaserCount < 1000`.
+2. Executes a single `PutItem` to create a `SessionItem` (`PK = EVENT#<id>#SESSION#<fanId>`, `SK = SESSION`) with a 5-minute TTL. The write uses a condition expression (`attribute_not_exists(PK)`) to prevent duplicate sessions.
 
-If the counter is at capacity, the transaction fails atomically — no session is created, no rollback needed. If the fan is not yet admitted (timestamp beyond watermark or tie-breaker filter), a 403 is returned.
+This simplifies slot claims by avoiding transactions or lock contention on a single global counter, resolving write bottlenecks when many users are admitted simultaneously.
 
-### **The Replenishment Feedback Loop — GSI-Based Counting**
+### **The Replenishment Feedback Loop - GSI-Based Counting**
 
-The Promotion Engine (runs continuously via EventBridge schedule + 58s internal loop) does not rely on TTL stream events or counter reads for replenishment. Instead it:
+The Promotion Engine (runs continuously via EventBridge schedule + 58s internal loop) does not rely on counter updates. Instead it:
 
-1. **Queries** the `SessionMetadataIndex` GSI with `GSIPK = EVENT#<id>#SESSION_META AND ExpiresAt > :now`, using the sort key on ExpiresAt to filter expired sessions at the DB level.
+1. **Queries** the `SessionMetadataIndex` GSI with `GSIPK = EVENT#<id>#SESSION_META AND ExpiresAt > :now`, using the sort key on ExpiresAt to filter expired sessions at the database level.
 2. **Counts** results via `Select: COUNT` to get the real active session count.
-3. Calculates `freeSlots = 1000 - validCount`, then advances the watermark to admit the next batch of users (using tie-breaking for partial-second precision).
+3. Calculates `freeSlots = 1000 - validCount`, then advances the watermark to admit the next batch of users.
 
-The sort key on ExpiresAt means expired sessions are excluded by DynamoDB itself, so no post-query filtering or pagination is needed. Sessions are capped at 1000, so the query always fits in one page.
+The sort key on ExpiresAt means expired sessions are excluded by DynamoDB itself. Sessions are capped at 1,000, so the query always fits in one page.
 
-Expired sessions are cleaned up asynchronously by DynamoDB TTL (no immediate deletion needed). The TTL default delay (up to 48h) is acceptable because the promotion engine continuously recomputes the real count from the GSI every second.
-
-A separate Reconciliation Lambda runs every 5 minutes using the same GSI-based counting to correct any counter drift.
+Expired sessions are cleaned up asynchronously by a Reconciliation Lambda that runs every 5 minutes using GSI-based counting to delete expired items.
 
 ## **Access Pattern Matrix**
 
-A well-architected DynamoDB solution must define its access patterns prior to deployment, ensuring that all operations utilize highly efficient Query or PutItem commands rather than expensive full-table Scans15. The following matrix details the fundamental access patterns that serve the Zero-Write Passive Promotion architecture.
+A well-architected DynamoDB solution must define its access patterns prior to deployment, ensuring that all operations utilize highly efficient Query or PutItem commands rather than expensive full-table Scans. The following matrix details the fundamental access patterns that serve the Zero-Write Passive Promotion architecture.
 
 | Access Pattern | Target | Key Condition | Condition Expression | Architectural Function |
 | :---- | :---- | :---- | :---- | :---- |
-| **1\. Ingest Fan (Stampede)** | Table | N/A (PutItem) | attribute\_not\_exists(PK) | PK \= EVENT\#\<Id\>\#SHARD\#\<Random\>, SK \= TS\#\<Time\>\#FAN\#\<FanId\>. Distributes write load across 2,000 random shards. |
-| **2\. Aggregator Stream Read** | DDB Stream | N/A | N/A | Captures QueueTicket INSERT events for density aggregation. |
-| **3\. Retrieve Global State** | Table | PK = EVENT\#\<Id\>\#METADATA, SK = METADATA | None | Point-read for watermark and tie-breaker threshold. Heavily cached at edge via CloudFront. |
-| **4\. Advance Watermark** | Table | PK = EVENT\#\<Id\>\#METADATA, SK = METADATA | AdmittedUntilTimestamp < :newWatermark | Single UpdateItem to shift the admission watermark (passive promotion). |
-| **5\. Count Active Sessions (Replenishment + Reconciliation)** | GSI | GSIPK = EVENT\#\<Id\>\#SESSION\_META AND ExpiresAt \> :now | None | Query the `SessionMetadataIndex` with sort key on ExpiresAt. `Select COUNT` returns only non-expired sessions filtered at the DB level. No post-query filtering needed. |
-| **6\. Claim Checkout Slot** | Table (TransactWriteItems) | N/A | attribute\_not\_exists(PK) AND ActivePurchaserCount < 1000 | Atomic transaction: creates SessionItem + increments counter. Fails atomically if counter at 1000. |
-| **7\. Release Checkout Slot** | Table | PK = EVENT\#\<Id\>\#SESSION\#\<FanId\>, SK = SESSION | attribute\_exists(PK) | Conditional DeleteItem (to prevent double-release), then decrement counter. |
-| **8\. Get Density Map** | Table | PK = EVENT\#\<Id\>\#DENSITY, SK begins\_with BUCKET\# | None | Single Query (not 20 parallel) to retrieve all per-second density buckets. |
+| **1. Ingest Fan (Stampede)** | Table | N/A (PutItem) | attribute\_not\_exists(PK) | PK = EVENT\#\<Id\>\#SHARD\#\<Random\>, SK = TS\#\<Time\>\#FAN\#\<FanId\>. Distributes write load across 2,000 random shards. |
+| **2. Aggregator Stream Read** | DDB Stream | N/A | N/A | Captures QueueTicket INSERT events for density aggregation. |
+| **3. Retrieve Global State** | Table | PK = EVENT\#\<Id\>\#METADATA, SK = METADATA | None | Point-read for watermark and tie-breaker threshold. Heavily cached at edge via CloudFront. |
+| **4. Advance Watermark** | Table | PK = EVENT\#\<Id\>\#METADATA, SK = METADATA | AdmittedUntilTimestamp < :newWatermark OR (AdmittedUntilTimestamp = :newWatermark AND (AdmittedFromBucket < :newAdmittedCount OR PartialAdmittedBucket <> :zero)) | Single UpdateItem to shift the admission watermark (passive promotion). |
+| **5. Count Active Sessions** | GSI | GSIPK = EVENT\#\<Id\>\#SESSION\_META AND ExpiresAt \> :now | None | Query the `SessionMetadataIndex` with sort key on ExpiresAt. `Select COUNT` returns only non-expired sessions. |
+| **6. Claim Checkout Slot** | Table | N/A (PutItem) | attribute\_not\_exists(PK) | Creates SessionItem when an admitted user claims a slot. |
+| **7. Release Checkout Slot** | Table | PK = EVENT\#\<Id\>\#SESSION\#\<FanId\>, SK = SESSION | attribute\_exists(PK) | Conditional DeleteItem to prevent double-release. |
+| **8. Get Density Map** | Table | PK = EVENT\#\<Id\>\#DENSITY\#SHARD\#\<ShardId\>, SK begins\_with BUCKET\# | None | Parallel queries across 10 shards to retrieve per-second density buckets. |
 
 ## **Design Rationale and Trade-off Analysis**
 

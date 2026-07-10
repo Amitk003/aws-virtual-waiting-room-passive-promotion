@@ -14,7 +14,7 @@ This is a single-table design in DynamoDB. All data goes into one table called `
 | Sort Key | SK (String) | Enables ordering and hierarchy |
 | GSI | SessionMetadataIndex (GSIPK + ExpiresAt) | Session counting with sort-key filtering |
 | TTL Attribute | ExpiresAt (Number) | Auto-cleanup sessions and old tickets |
-| Streams | NEW_AND_OLD_IMAGES | Required for aggregator and TTL-auto-release |
+| Streams | NEW_AND_OLD_IMAGES | Required for aggregator |
 
 ## Entities
 
@@ -42,34 +42,23 @@ A single item that tracks the overall queue state.
 | PK | String | `EVENT#match2026#METADATA` | Fixed key - only one item |
 | SK | String | `METADATA` | Fixed sort key |
 | AdmittedUntilTimestamp | Number | `1719997202000` | Users before this time can enter |
-| ActivePurchaserCount | Number | `950` | How many users are currently buying |
 | TieBreakerThreshold | Number | `100` | Fraction (0-100) for partial-second tie-breaking |
 
-**Purpose**: This is the "watermark" item. It tells the system how far the admission window has moved. Users check their timestamp against `AdmittedUntilTimestamp` to know if they can enter.
+**Purpose**: This is the watermark item. It tells the system how far the admission window has moved. Users check their timestamp against `AdmittedUntilTimestamp` and evaluate their HMAC-based tie-breaker to know if they can enter.
 
 ### 3. DensityBucket
 
-Stores the count of users who joined in each 1-second time bucket. Written by the
-Stream Aggregator which accumulates counts per batch and flushes via atomic ADD.
-Shard-level pre-aggregation reduces GlobalState updates from millions to ~2000/sec.
+Stores the count of users who joined in each 1-second time bucket. Written by the Stream Aggregator.
 
 | Attribute | Type | Example | Notes |
 |-----------|------|---------|-------|
-| PK | String | `EVENT#match2026#DENSITY` | Single partition (pre-aggregation keeps write rate < 1000 WCU) |
+| PK | String | `EVENT#match2026#DENSITY#SHARD#3` | Sharded partition (0-9) to avoid write hotspots |
 | SK | String | `BUCKET#1719997200` | Timestamp in seconds (rounded down) |
 | Count | Number | `15000` | Number of users who joined in this second |
 
-**Why separate items instead of a JSON map on GlobalState**: Atomic updates via
-`ADD Count :inc` are safe across concurrent aggregator instances. A JSON string
-on GlobalState would require read-modify-write and risk race conditions.
+**Why separate items instead of a JSON map on GlobalState**: Atomic updates via `ADD Count :inc` are safe across concurrent aggregator instances. A JSON string on GlobalState would require read-modify-write and risk race conditions.
 
-**PK**: A single partition key `EVENT#<EventId>#DENSITY` is used instead of
-sharding. The stream aggregator pre-aggregates counts in memory per batch
-before writing, so the write rate to this partition stays well below 1000 WCU.
-The read path issues a single Query, eliminating read amplification.
-
-**Pruning**: After `AdmittedUntilTimestamp` advances past a bucket, the bucket
-data is no longer needed. A periodic task can delete old DensityBucket items.
+**PK**: The density buckets are sharded across 10 partitions (`EVENT#<EventId>#DENSITY#SHARD#<0-9>`) to prevent write hotspots in the aggregator. The read path queries all 10 shards in parallel and aggregates them in memory, which remains fast and cost-effective.
 
 ### 4. SessionItem
 
@@ -82,42 +71,33 @@ Represents one user's active checkout session. Created dynamically when a user e
 | GSIPK | String | `EVENT#match2026#SESSION_META` | GSI key for session counting |
 | FanId | String | `fan_8872` | User identifier |
 | StartedAt | Number | `1719997700` | Session start timestamp |
-| ExpiresAt | Number | `1720083605` | TTL expiry (5 min lease). Auto-deletes on abandon. |
+| ExpiresAt | Number | `1720083605` | TTL expiry (5 min lease). |
 
-**Purpose**: Controls how many users can be in the checkout process at the same time. Max 1000. TTL auto-clears abandoned sessions. Stream triggers decrement `ActivePurchaserCount` on cleanup.
+**Purpose**: Controls how many users can be in the checkout process at the same time. Max 1000. TTL auto-clears abandoned sessions. The GSI index and query ensure exact counts are evaluated before watermark advancement.
 
 ### 5. Tracking
 
-Tracks a known user who has not yet joined the queue (pre-registration or admin-initiated).
+Tracks a known user's join state to prevent duplicate joins.
 
 | Attribute | Type | Example | Notes |
 |-----------|------|---------|-------|
-| PK | String | `EVENT#match2026#TRACKING#fan_11223` | Per-user tracking item |
+| PK | String | `EVENT#match2026#FAN#fan_11223` | Per-user tracking item |
 | SK | String | `PENDING` | Fixed sort key |
 | FanId | String | `fan_11223` | User identifier |
 | ExpiresAt | Number | `1720083605` | TTL expiry for cleanup |
 
-**Purpose**: Used by the ingestion handler to detect double-join attempts.
-When a user joins, the handler writes a tracking item first.
-If a tracking item already exists, the join is rejected.
+**Purpose**: Used by the ingestion handler to detect double-join attempts. Write tracking item first. Rejoin endpoint allows recovering the token if lost.
 
 ## Density Map
 
-The density map is stored as individual DensityBucket items (one per 1-second
-bucket). The read path issues a single Query on `PK = EVENT#<Id>#DENSITY` with
-`SK begins_with BUCKET#` to retrieve all buckets. With at most 3600 items for a
-typical event, this is fast and cost-effective.
+The density map is stored as individual DensityBucket items across 10 shards. The read path issues parallel queries on `PK = EVENT#<Id>#DENSITY#SHARD#<0-9>` with `SK begins_with BUCKET#` and aggregates them in memory.
 
 ### Stream Aggregator Flow
 
-1. DynamoDB Stream delivers QueueTicket INSERT events per shard
-2. Aggregator Lambda extracts `entryTimestamp`, rounds to 1-second buckets
-3. Accumulates counts per bucket in memory across a batch (up to 100 records)
-4. Flushes via `UpdateItem ADD Count :inc` on the DensityBucket item
-5. TTL REMOVE events on SessionItem decrement `ActivePurchaserCount` on GlobalState
-
-This is a shard-level pre-aggregation pattern. Each DynamoDB Stream shard has its
-own Lambda instance, so aggregation is naturally parallelized.
+1. DynamoDB Stream delivers QueueTicket INSERT events per shard.
+2. Aggregator Lambda extracts `entryTimestamp`, rounds to 1-second buckets.
+3. Accumulates counts per bucket in memory across a batch.
+4. Flushes via `UpdateItem ADD Count :inc` on the sharded DensityBucket item.
 
 ## Global Secondary Index: SessionMetadataIndex
 
@@ -128,34 +108,28 @@ own Lambda instance, so aggregation is naturally parallelized.
 | Sort Key | ExpiresAt (Number) |
 | Projection | INCLUDE (StartedAt) |
 
-**Purpose**: Used by the promotion engine (every 1s) and reconciliation Lambda (every 5min) to count active sessions. Query `GSIPK = EVENT#<Id>#SESSION_META AND ExpiresAt > :now` returns only non-expired sessions. The sort key on ExpiresAt means expired sessions are filtered at the DB level, so no post-query filtering or pagination is needed. Sessions are capped at 1000, so the query always fits in one page.
+**Purpose**: Used by the promotion engine (every 1s) to count active sessions. Query `GSIPK = EVENT#<Id>#SESSION_META AND ExpiresAt > :now` returns only non-expired sessions. The sort key on ExpiresAt means expired sessions are filtered at the DB level, so no post-query filtering is needed. Sessions are capped at 1000, so the query always fits in one page.
 
 ## Key Design Choices
 
 **Write Sharding**
-- The QueueTicket PK has a random number (1-2000) at the end
-- This spreads 1 million writes per second evenly across DynamoDB partitions
-- No partition gets more than 500 writes per second
-- This avoids throttling during the initial traffic burst
+- The QueueTicket PK has a random number (1-2000) at the end.
+- This spreads 1 million writes per second evenly across DynamoDB partitions.
+- No partition gets more than 500 writes per second.
+- This avoids throttling during the initial traffic burst.
 
 **Dynamic Sessions Instead of Pre-populated Slots**
-- Sessions are created on-demand when a user passes edge auth
-- PK is unique per fan, so writes are naturally distributed
-- No pre-population script needed
-- No risk of hot partition on slot operations
+- Sessions are created on-demand when a user claims a slot.
+- PK is unique per fan, so writes are naturally distributed.
+- No pre-population script needed.
+- No risk of hot partition on slot operations.
 
-**TTL Auto-Release**
-- Session items have a 5-minute TTL
-- If a user abandons checkout, the session auto-deletes
-- The Stream Aggregator detects the TTL REMOVE event and decrements `ActivePurchaserCount`
-- A reconciliation Lambda runs every 5 minutes to correct counter drift
-
-**Density Bucket Pruning**
-- DensityBucket items for timestamps before `AdmittedUntilTimestamp` can be deleted
-- A periodic task (reconciliation Lambda) removes old buckets to reduce storage
-- With at most 3600 buckets per event, storage is negligible
+**TTL Auto-Release and Reconciliation**
+- Session items have a 5-minute TTL.
+- If a user abandons checkout, the session is ignored by GSI queries as soon as it expires.
+- A reconciliation Lambda runs every 5 minutes to actively purge expired session items from the table.
 
 **Entity Overloading**
-- All entity types live in the same table
+- All entity types live in the same table.
 - Different PK prefixes separate them: `EVENT#...`
-- This keeps the design simple and uses DynamoDB efficiently
+- This keeps the design simple and uses DynamoDB efficiently.
