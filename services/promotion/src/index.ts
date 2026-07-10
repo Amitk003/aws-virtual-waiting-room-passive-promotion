@@ -1,4 +1,4 @@
-import { DynamoDBClient, GetItemCommand, QueryCommand, UpdateItemCommand, DeleteItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, GetItemCommand, QueryCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 
 const ddb = new DynamoDBClient();
 const TABLE_NAME = process.env.TABLE_NAME!;
@@ -75,7 +75,13 @@ export async function handler(): Promise<void> {
 
     const admittedUntilTimestamp = Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0);
 
-    // Query GSI to count active (non-expired) sessions
+    // Query GSI to count valid (non-expired) sessions
+    // Expired sessions are not deleted here — they are left for DynamoDB TTL
+    // to remove asynchronously. TTL-driven REMOVE events are handled by the
+    // Stream Aggregator which conditionally decrements the counter.
+    // By counting only valid sessions and SET-ing the counter, we avoid the
+    // double-decrement race that would occur if we both deleted items here
+    // and relied on the stream aggregator.
     const sessionQuery = await ddb.send(new QueryCommand({
       TableName: TABLE_NAME,
       IndexName: 'SessionMetadataIndex',
@@ -83,39 +89,30 @@ export async function handler(): Promise<void> {
       ExpressionAttributeValues: {
         ':gsiPk': { S: `EVENT#${EVENT_ID}#SESSION_META` },
       },
-      ProjectionExpression: 'ExpiresAt, StartedAt',
+      ProjectionExpression: 'ExpiresAt',
     }));
 
     const nowSeconds = Math.floor(Date.now() / 1000);
     let validSessionCount = 0;
-    const deletePromises: Promise<any>[] = [];
-
     for (const item of sessionQuery.Items || []) {
       const expiresAt = Number(item.ExpiresAt?.N || 0);
       if (expiresAt > nowSeconds) {
         validSessionCount++;
-      } else {
-        // Expired session — delete immediately
-        const pk = item.PK?.S || '';
-        const sk = item.SK?.S || 'SESSION';
-        if (pk) {
-          deletePromises.push(ddb.send(new DeleteItemCommand({
-            TableName: TABLE_NAME,
-            Key: {
-              PK: { S: pk },
-              SK: { S: sk },
-            },
-          })));
-        }
       }
     }
 
-    // Fire-and-forget expired session deletions (don't block the loop)
-    if (deletePromises.length > 0) {
-      Promise.all(deletePromises).catch(err =>
-        console.error('Failed to delete expired sessions:', err)
-      );
-    }
+    // Sync counter to the real count every iteration
+    await ddb.send(new UpdateItemCommand({
+      TableName: TABLE_NAME,
+      Key: {
+        PK: { S: `EVENT#${EVENT_ID}#METADATA` },
+        SK: { S: 'METADATA' },
+      },
+      UpdateExpression: 'SET ActivePurchaserCount = :count',
+      ExpressionAttributeValues: {
+        ':count': { N: String(validSessionCount) },
+      },
+    }));
 
     const freeSlots = MAX_SLOTS - validSessionCount;
     if (freeSlots <= 0) {
