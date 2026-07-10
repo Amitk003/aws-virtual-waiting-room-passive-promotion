@@ -9,6 +9,7 @@ import * as apigwIntegrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import * as path from 'node:path';
@@ -305,6 +306,116 @@ export class InfraStack extends cdk.Stack {
       },
       defaultRootObject: '',
       priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
+    });
+
+    // --- CloudWatch Dashboard ---
+
+    const dashboard = new cloudwatch.Dashboard(this, 'WaitingRoomDashboard', {
+      dashboardName: 'VirtualWaitingRoom',
+    });
+
+    const lambdaWidgets = [
+      { name: 'IngestionHandler', fn: ingestionFn },
+      { name: 'StreamAggregator', fn: aggregatorFn },
+      { name: 'StatusHandler', fn: statusFn },
+      { name: 'SlotHandler', fn: slotFn },
+      { name: 'ReconciliationHandler', fn: reconciliationFn },
+      { name: 'PromotionEngine', fn: promotionFn },
+    ];
+
+    for (const { name, fn } of lambdaWidgets) {
+      dashboard.addWidgets(new cloudwatch.GraphWidget({
+        title: `${name} - Errors & Throttles`,
+        left: [
+          fn.metricErrors({ statistic: 'Sum', period: cdk.Duration.minutes(1) }),
+          fn.metricThrottles({ statistic: 'Sum', period: cdk.Duration.minutes(1) }),
+        ],
+        width: 12,
+        height: 6,
+      }));
+    }
+
+    dashboard.addWidgets(new cloudwatch.GraphWidget({
+      title: 'DynamoDB - Throttled Requests',
+      left: [
+        new cloudwatch.Metric({
+          namespace: 'AWS/DynamoDB',
+          metricName: 'WriteThrottleEvents',
+          dimensionsMap: { TableName: table.tableName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(1),
+        }),
+        new cloudwatch.Metric({
+          namespace: 'AWS/DynamoDB',
+          metricName: 'ReadThrottleEvents',
+          dimensionsMap: { TableName: table.tableName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(1),
+        }),
+      ],
+      width: 12,
+      height: 6,
+    }));
+
+    dashboard.addWidgets(new cloudwatch.GraphWidget({
+      title: 'DynamoDB - Consumed Capacity',
+      left: [
+        new cloudwatch.Metric({
+          namespace: 'AWS/DynamoDB',
+          metricName: 'ConsumedWriteCapacityUnits',
+          dimensionsMap: { TableName: table.tableName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(1),
+        }),
+        new cloudwatch.Metric({
+          namespace: 'AWS/DynamoDB',
+          metricName: 'ConsumedReadCapacityUnits',
+          dimensionsMap: { TableName: table.tableName },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(1),
+        }),
+      ],
+      width: 12,
+      height: 6,
+    }));
+
+    dashboard.addWidgets(new cloudwatch.GraphWidget({
+      title: 'API Gateway - 5XX Errors',
+      left: [
+        new cloudwatch.Metric({
+          namespace: 'AWS/ApiGateway',
+          metricName: '5XXError',
+          dimensionsMap: { ApiName: 'VirtualWaitingRoom-Api' },
+          statistic: 'Sum',
+          period: cdk.Duration.minutes(1),
+        }),
+      ],
+      width: 12,
+      height: 6,
+    }));
+
+    // --- Alarms ---
+
+    new cloudwatch.Alarm(this, 'IngestionErrorAlarm', {
+      metric: ingestionFn.metricErrors({ period: cdk.Duration.minutes(5) }),
+      threshold: 0,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      alarmDescription: 'Ingestion Lambda has errors. Check logs.',
+    });
+
+    new cloudwatch.Alarm(this, 'DynamoDbWriteThrottleAlarm', {
+      metric: new cloudwatch.Metric({
+        namespace: 'AWS/DynamoDB',
+        metricName: 'WriteThrottleEvents',
+        dimensionsMap: { TableName: table.tableName },
+        statistic: 'Sum',
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 0,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_THRESHOLD,
+      alarmDescription: 'DynamoDB write throttling detected. Table may need pre-warming.',
     });
 
     // --- Outputs ---

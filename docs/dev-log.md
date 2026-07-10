@@ -393,3 +393,29 @@ Promotion engine design:
 - Walks forward from watermark, fills free slots from density buckets
 - Advances AdmittedUntilTimestamp via single UpdateItem
 - Zero DB load when slots are full (only GetItem per iteration)
+
+---
+
+## Branch: feature/phase-8-operational-tooling
+
+### 2026-07-10 - Pre-warming script, CloudWatch dashboard, key rotation
+
+Commands ran:
+- Created `scripts/prewarm-table.js` and `scripts/rotate-key.js`
+- `npx cdk synth` - Generated CloudFormation with dashboard and alarms
+
+Files created:
+- `scripts/prewarm-table.js` - Toggle DynamoDB billing mode (PAY_PER_REQUEST ↔ PROVISIONED)
+- `scripts/rotate-key.js` - Rotate JWT signing key with new kid version
+
+Files modified:
+- `infra/lib/infra-stack.ts` - Added CloudWatch dashboard + alarms
+- `docs/dev-log.md` - This entry
+
+CDK additions:
+- Dashboard: VirtualWaitingRoom with widgets for all 6 Lambdas (errors + throttles), DynamoDB throttled requests and consumed capacity, API Gateway 5XX errors
+- Alarms: Ingestion Lambda errors > 0, DynamoDB write throttling > 0
+
+Scripts:
+- prewarm-table.js: Switches table to PROVISIONED with target WCU/RCU before event, back to PAY_PER_REQUEST after
+- rotate-key.js: Generates new ECC P-256 key pair, stores with new kid version in Secrets Manager
