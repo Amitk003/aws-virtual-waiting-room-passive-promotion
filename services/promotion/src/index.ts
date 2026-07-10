@@ -146,7 +146,11 @@ export async function handler(): Promise<void> {
     }
 
     const newWatermarkMs = newWatermarkSec * 1000;
-    if (newWatermarkMs > admittedUntilTimestamp) {
+    const isWatermarkAdvancing = newWatermarkMs > admittedUntilTimestamp;
+    const isPartialBucketProgressing = newWatermarkMs === admittedUntilTimestamp &&
+      (partialBucketCount === null ? (partialBucket !== 0) : (partialBucketCount > admittedFromBucket));
+
+    if (isWatermarkAdvancing || isPartialBucketProgressing) {
       let updateExpression = 'SET AdmittedUntilTimestamp = :newWatermark, TieBreakerThreshold = :threshold';
       const expressionAttributeValues: Record<string, any> = {
         ':newWatermark': { N: String(newWatermarkMs) },
@@ -155,7 +159,7 @@ export async function handler(): Promise<void> {
 
       if (partialBucketCount !== null) {
         updateExpression += ', PartialAdmittedBucket = :partialBucket, AdmittedFromBucket = :admittedCount';
-        expressionAttributeValues[':partialBucket'] = { N: String(partialBucket!) };
+        expressionAttributeValues[':partialBucket'] = { N: String(newWatermarkSec) };
         expressionAttributeValues[':admittedCount'] = { N: String(partialBucketCount) };
       } else {
         updateExpression += ', PartialAdmittedBucket = :zero, AdmittedFromBucket = :zero';
@@ -169,8 +173,12 @@ export async function handler(): Promise<void> {
           SK: { S: 'METADATA' },
         },
         UpdateExpression: updateExpression,
-        ConditionExpression: 'attribute_not_exists(AdmittedUntilTimestamp) OR AdmittedUntilTimestamp < :newWatermark',
-        ExpressionAttributeValues: expressionAttributeValues,
+        ConditionExpression: 'attribute_not_exists(AdmittedUntilTimestamp) OR AdmittedUntilTimestamp < :newWatermark OR (AdmittedUntilTimestamp = :newWatermark AND (AdmittedFromBucket < :newAdmittedCount OR PartialAdmittedBucket <> :zero))',
+        ExpressionAttributeValues: {
+          ...expressionAttributeValues,
+          ':newAdmittedCount': { N: String(partialBucketCount ?? 0) },
+          ':zero': { N: '0' },
+        },
       }));
 
       console.log(JSON.stringify({
