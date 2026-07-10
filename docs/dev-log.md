@@ -146,3 +146,46 @@ Files changed:
 - `infra/lib/infra-stack.ts` - Major cleanup
 - `docs/iac-setup.md` - Updated to reflect removal of IAM roles
 - `docs/dev-log.md` - This entry
+
+---
+
+## Branch: feature/phase-3-ingestion-tier
+
+### 2026-07-10 - Ingestion Lambda and API Gateway setup
+
+Commands ran:
+- `git checkout main && git checkout -b feature/phase-3-ingestion-tier` - Create branch
+- `New-Item services/ingestion/src, services/ingestion/test` - Create Lambda project dirs
+- `npm install` (in services/ingestion/) - Install SDK deps
+- `npm install --save-dev esbuild` (in infra/) - Install bundler for NodejsFunction
+- `npx tsc --noEmit` - Verified TypeScript compilation
+- `npx cdk synth` - Generated CloudFormation (Lambda + API Gateway bundled successfully)
+
+Packages installed:
+- In services/ingestion/: @aws-sdk/client-dynamodb, @aws-sdk/client-kms, @types/aws-lambda, jest, typescript, etc.
+- In infra/: esbuild (dev dependency for Lambda bundling)
+
+Files created:
+- `services/ingestion/package.json` - Node.js project config
+- `services/ingestion/tsconfig.json` - TypeScript config
+- `services/ingestion/src/index.ts` - Lambda handler (event parsing, sharding, DynamoDB write, JWT sign)
+- `services/ingestion/src/jwt.ts` - JWT signing utility using KMS Sign API (ES256)
+- `services/ingestion/src/shard.ts` - Shard ID generator (1-2000)
+- `services/ingestion/test/ingestion.test.ts` - Shard distribution unit tests
+- `docs/ingestion-service.md` - Ingestion service documentation
+
+Files modified:
+- `infra/lib/infra-stack.ts` - Added NodejsFunction for ingestion Lambda, HttpApi with route, IAM grants
+
+Stack additions:
+- Lambda: IngestionHandler (Node.js 22.x, ARM64, 512MB, 10s timeout)
+- API Gateway: HTTP API with POST /api/v1/event/{eventId}/join
+- IAM: Auto-created role with DynamoDB write + KMS sign permissions
+- CORS: Enabled for content-type and authorization headers
+- Provisioned Concurrency: Placeholder (commented out, to be enabled before event)
+
+Notes:
+- Lambda uses KMS Sign API directly (for production at 1M scale, switch to local key caching from Secrets Manager)
+- Table name and key ID passed via environment variables
+- projectRoot set to repo root for cross-directory Lambda bundling
+- API Gateway uses HTTP API (v2) for lower latency and cost
