@@ -22,7 +22,6 @@
           { "AttributeName": "EntryTimestamp", "AttributeType": "N" },
           { "AttributeName": "ShardId", "AttributeType": "N" },
           { "AttributeName": "AdmittedUntilTimestamp", "AttributeType": "N" },
-          { "AttributeName": "ActivePurchaserCount", "AttributeType": "N" },
           { "AttributeName": "TieBreakerThreshold", "AttributeType": "N" },
           { "AttributeName": "ExpiresAt", "AttributeType": "N" },
           { "AttributeName": "StartedAt", "AttributeType": "N" }
@@ -45,7 +44,6 @@
             "PK": { "S": "EVENT#match2026#METADATA" },
             "SK": { "S": "METADATA" },
             "AdmittedUntilTimestamp": { "N": "1719997202000" },
-            "ActivePurchaserCount": { "N": "950" },
             "TieBreakerThreshold": { "N": "100" },
             "PartialAdmittedBucket": { "N": "0" },
             "AdmittedFromBucket": { "N": "0" }

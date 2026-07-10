@@ -15,7 +15,6 @@ const CACHE_TTL_MS = 2000;
 interface GlobalState {
   admittedUntilTimestamp: number;
   tieBreakerThreshold: number;
-  activePurchaserCount: number;
   densityBuckets: Array<{ bucketTs: number; count: number }>;
 }
 
@@ -73,7 +72,7 @@ async function loadState(eventId: string): Promise<CachedState> {
         PK: { S: `EVENT#${eventId}#METADATA` },
         SK: { S: 'METADATA' },
       },
-      ProjectionExpression: 'AdmittedUntilTimestamp, ActivePurchaserCount, TieBreakerThreshold',
+      ProjectionExpression: 'AdmittedUntilTimestamp, TieBreakerThreshold',
     })),
     queryDensity(eventId),
   ]);
@@ -82,7 +81,6 @@ async function loadState(eventId: string): Promise<CachedState> {
     timestamp: now,
     admittedUntilTimestamp: Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0),
     tieBreakerThreshold: Number(globalState.Item?.TieBreakerThreshold?.N || 100),
-    activePurchaserCount: Number(globalState.Item?.ActivePurchaserCount?.N || 0),
     densityBuckets,
   };
 
@@ -115,7 +113,6 @@ export async function handler(
       body: JSON.stringify({
         admittedUntilTimestamp: state.admittedUntilTimestamp,
         tieBreakerThreshold: state.tieBreakerThreshold,
-        activePurchaserCount: state.activePurchaserCount,
         densityBuckets: state.densityBuckets,
       }),
     };

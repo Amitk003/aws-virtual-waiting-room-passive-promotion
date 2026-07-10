@@ -60,6 +60,7 @@ export class InfraStack extends cdk.Stack {
       environment: {
         TABLE_NAME: table.tableName,
         SIGNING_SECRET_ID: signingSecret.secretName,
+        EVENT_ID: 'match2026',
       },
       bundling: {
         target: 'es2022',
@@ -141,7 +142,6 @@ export class InfraStack extends cdk.Stack {
     });
 
     table.grantReadData(statusFn);
-    signingSecret.grantRead(statusFn);
 
     // --- Slot Handler Lambda ---
     // POST /claim  - Creates a SessionItem and increments ActivePurchaserCount (capped at 1000)

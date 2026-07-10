@@ -25,20 +25,7 @@ async function correctCounter(eventId: string): Promise<void> {
   }));
 
   const validCount = result.Count ?? 0;
-
-  await ddb.send(new UpdateItemCommand({
-    TableName: TABLE_NAME,
-    Key: {
-      PK: { S: `EVENT#${eventId}#METADATA` },
-      SK: { S: 'METADATA' },
-    },
-    UpdateExpression: 'SET ActivePurchaserCount = :count',
-    ExpressionAttributeValues: {
-      ':count': { N: String(validCount) },
-    },
-  }));
-
-  console.log(`Reconciled ActivePurchaserCount for ${eventId}: ${validCount}`);
+  console.log(`Active session count for ${eventId}: ${validCount}`);
 }
 
 export async function handler(): Promise<void> {
