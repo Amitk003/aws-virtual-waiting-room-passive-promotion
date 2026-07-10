@@ -82,3 +82,51 @@ Files changed:
 - `docs/data-model-spec.md` - Full rewrite of entities section
 - `docs/access-patterns.md` - Full rewrite of patterns 5-9
 - `docs/dev-log.md` - This entry
+
+---
+
+## Branch: feature/phase-2-iac-setup
+
+### 2026-07-10 - CDK v2 TypeScript project setup and stack definition
+
+Commands ran:
+- `git checkout main && git checkout -b feature/phase-2-iac-setup` - Create phase 2 feature branch
+- `npx aws-cdk@latest init app --language typescript --generate-only` - Initialize CDK project in infra/
+- `npm install` - Install CDK dependencies (aws-cdk-lib, constructs, jest, typescript, etc.)
+- `npx tsc --noEmit` - Verify TypeScript compilation (fixed KeySpec enum and addAlias API)
+- `npx cdk synth` - Generate CloudFormation template (verified output)
+
+Packages installed (via CDK init + npm install):
+- aws-cdk-lib ^2.261.0
+- constructs ^10.5.0
+- aws-cdk 2.1130.0 (dev)
+- typescript ~5.9.3 (dev)
+- jest ^30 (dev)
+- ts-jest ^29 (dev)
+- ts-node ^10.9.2 (dev)
+- @types/node ^24.10.1 (dev)
+- @types/jest ^30 (dev)
+
+Files created:
+- `infra/bin/infra.ts` - CDK app entry point
+- `infra/lib/infra-stack.ts` - Stack with DynamoDB table, KMS key, IAM roles
+- `infra/test/infra.test.ts` - Unit test template
+- `infra/package.json` - Node.js project config
+- `infra/tsconfig.json` - TypeScript config
+- `infra/cdk.json` - CDK toolkit config
+- `infra/jest.config.js` - Jest config
+- `infra/.gitignore` - CDK-specific ignore rules
+- `docs/iac-setup.md` - IaC documentation
+
+Stack resources defined:
+- DynamoDB Table: VirtualWaitingRoom (PAY_PER_REQUEST, PK/SK, Streams, TTL, GSI)
+- KMS Key: Asymmetric ECC_NIST_P256 for JWT signing (with alias)
+- IAM Roles: 6 roles (Ingestion, Aggregator, Status, Slot, Promotion, Reconciliation)
+
+Notes:
+- Table uses PAY_PER_REQUEST to avoid account limit errors on deployment
+- Pre-warming to 1M WCU will be done via a separate CLI script before the event
+- CDK stack produces AWS::DynamoDB::Table (not GlobalTable) for NoSQL Workbench compatibility
+- All IAM roles follow least-privilege principles
+- KMS key is asymmetric (ECC_P256) so public key can be cached at edge for offline JWT verification
+- 6 roles defined to match the Lambda functions planned in future phases
