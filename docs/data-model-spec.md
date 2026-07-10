@@ -56,13 +56,18 @@ Shard-level pre-aggregation reduces GlobalState updates from millions to ~2000/s
 
 | Attribute | Type | Example | Notes |
 |-----------|------|---------|-------|
-| PK | String | `EVENT#match2026#DENSITY` | Same for all buckets of an event |
+| PK | String | `EVENT#match2026#DENSITY#SHARD#7` | Hash of bucket timestamp mod 20 (scatters writes) |
 | SK | String | `BUCKET#1719997200` | Timestamp in seconds (rounded down) |
 | Count | Number | `4521` | Number of users who joined in this second |
 
 **Why separate items instead of a JSON map on GlobalState**: Atomic updates via
 `ADD Count :inc` are safe across concurrent aggregator instances. A JSON string
 on GlobalState would require read-modify-write and risk race conditions.
+
+**Sharded PK**: The PK is sharded across 20 partitions (`#SHARD#<1-20>`) using
+`bucketTimestamp % 20 + 1`. This scatters writes evenly and keeps each partition
+well below the 1000 WCU cap. The read path queries all 20 shards in parallel and
+merges the results in memory.
 
 **Pruning**: After `AdmittedUntilTimestamp` advances past a bucket, the bucket
 data is no longer needed. A periodic task can delete old DensityBucket items.

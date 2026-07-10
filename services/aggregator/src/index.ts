@@ -3,8 +3,8 @@ import { DynamoDBStreamEvent, DynamoDBStreamHandler } from 'aws-lambda';
 
 const ddb = new DynamoDBClient();
 const TABLE_NAME = process.env.TABLE_NAME!;
+const DENSITY_SHARD_COUNT = 20;
 
-// Extracts the event ID from a QueueTicket PK (EVENT#<eventId>#SHARD#<shardId>)
 function extractEventId(pk: string): string | null {
   const parts = pk.split('#');
   if (parts.length >= 2) {
@@ -13,7 +13,6 @@ function extractEventId(pk: string): string | null {
   return null;
 }
 
-// Flush buffer and return a new empty one
 function flush(
   buffer: Array<{ eventId: string; bucketTs: string; count: number }>,
   ttlCounters: Map<string, number>
@@ -21,10 +20,11 @@ function flush(
   const promises: Promise<any>[] = [];
 
   for (const entry of buffer) {
+    const shardId = (parseInt(entry.bucketTs) % DENSITY_SHARD_COUNT) + 1;
     promises.push(ddb.send(new UpdateItemCommand({
       TableName: TABLE_NAME,
       Key: {
-        PK: { S: `EVENT#${entry.eventId}#DENSITY` },
+        PK: { S: `EVENT#${entry.eventId}#DENSITY#SHARD#${shardId}` },
         SK: { S: `BUCKET#${entry.bucketTs}` },
       },
       UpdateExpression: 'ADD #count :inc',
@@ -69,8 +69,15 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
       }
     }
 
-    // SessionItem REMOVE by TTL: decrement ActivePurchaserCount
-    if (record.eventName === 'REMOVE' && record.dynamodb?.OldImage) {
+    // SessionItem REMOVE: only process TTL-driven expirations
+    // Manual DeleteItem from the Slot Handler already decrements the counter,
+    // so we must skip those to avoid double-decrement.
+    if (
+      record.eventName === 'REMOVE' &&
+      record.dynamodb?.OldImage &&
+      record.userIdentity?.type === 'Service' &&
+      record.userIdentity?.principalId === 'dynamodb.amazonaws.com'
+    ) {
       const pk = record.dynamodb.OldImage.PK?.S || '';
 
       if (pk.includes('#SESSION#')) {
@@ -82,7 +89,6 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
     }
   }
 
-  // Flush accumulated counts
   const buffer: Array<{ eventId: string; bucketTs: string; count: number }> = [];
   for (const [key, count] of densityByBucket) {
     const [eventId, bucketTs] = key.split('#');

@@ -76,11 +76,11 @@ This document lists all database operations the system needs. Each pattern was t
 
 ## Pattern 10: Get Time Density Map
 
-- **Operation**: Query
+- **Operation**: Parallel Query (20 shards)
 - **Target**: Table
-- **PK**: `EVENT#<EventId>#DENSITY`
+- **PK**: `EVENT#<EventId>#DENSITY#SHARD#<1-20>`
 - **SK**: begins_with `BUCKET#`
-- **Purpose**: Returns all DensityBucket items for an event. Each item has a `Count` attribute representing the number of users who joined in that 1-second bucket. The total queue position for a user at timestamp T is the sum of all Count values for buckets before T. With at most 3600 items for a typical 1-hour event, this is fast enough to serve at the edge.
+- **Purpose**: Returns all DensityBucket items for an event. Density items are sharded across 20 partitions to avoid the 1000 WCU ceiling. The read path queries all 20 shards in parallel and merges the results in memory. Each item has a `Count` attribute representing the number of users who joined in that 1-second bucket. The total queue position for a user at timestamp T is the sum of all Count values for buckets before T. With at most 3600 items total, 20 small queries are still fast enough to serve at the edge.
 
 - **Operation**: Query GSI + UpdateItem
 - **Target**: GSI + Table
