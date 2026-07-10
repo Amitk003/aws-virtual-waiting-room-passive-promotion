@@ -19,7 +19,12 @@ function flush(
   const promises: Promise<any>[] = [];
 
   for (const entry of buffer) {
-    const shard = parseInt(entry.bucketTs) % 10;
+    // Deterministic shard assignment using string hash to avoid hotspotting
+    let hash = 5381;
+    for (let i = 0; i < entry.bucketTs.length; i++) {
+      hash = ((hash << 5) + hash) + entry.bucketTs.charCodeAt(i);
+    }
+    const shard = Math.abs(hash) % 10;
     promises.push(ddb.send(new UpdateItemCommand({
       TableName: TABLE_NAME,
       Key: {
