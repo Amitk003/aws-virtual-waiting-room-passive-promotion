@@ -54,10 +54,31 @@ How to import:
 5. The table schema will appear in the data modeler
 
 Notes:
-- Data model has 3 entities: QueueTicket, GlobalState, ActiveSlot
+- Data model has 3 entities: QueueTicket, GlobalState, SessionItem
 - Uses single-table design with generic PK/SK pattern
 - Write sharding uses 2000 random shards
 - Passive promotion uses global watermark for batch promotion
-- ProvisionedThroughput set to 5K RCU / 1M WCU for pre-warming
 - Streams enabled (NEW_AND_OLD_IMAGES) for aggregator
 - TTL enabled on ExpiresAt attribute for auto-cleanup
+
+### 2026-07-10 - Major data model refactor: removed ActiveSlot, added SessionItem + GSI
+
+Commands ran:
+- Updated `data-model/virtual-waiting-room.json` - Changed to PAY_PER_REQUEST, removed ProvisionedThroughput, added GSIPK attribute and SessionMetadataIndex GSI
+- Updated `docs/data-model-spec.md` - Replaced ActiveSlot entity with SessionItem entity, added GSI docs, added pruning note
+- Updated `docs/access-patterns.md` - Replaced patterns 5-7 (slot-based) with patterns 5-9 (session-based including TTL auto-release and reconciliation)
+
+Reason for changes:
+- ActiveSlot design created a hot partition risk (all 1000 slots under one PK)
+- Pre-populating 1000 slots added unnecessary init complexity
+- New SessionItem approach uses unique PK per fan, naturally distributed writes
+- TTL auto-release via stream is self-healing (no cron job for expiry)
+- Reconciliation Lambda every 5 min corrects counter drift
+- PAY_PER_REQUEST avoids account limit deployment failures
+- Added SessionMetadataIndex GSI for reconciliation queries
+
+Files changed:
+- `data-model/virtual-waiting-room.json` - Schema update
+- `docs/data-model-spec.md` - Full rewrite of entities section
+- `docs/access-patterns.md` - Full rewrite of patterns 5-9
+- `docs/dev-log.md` - This entry

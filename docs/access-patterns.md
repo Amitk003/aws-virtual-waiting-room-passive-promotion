@@ -15,7 +15,7 @@ This document lists all database operations the system needs. Each pattern was t
 
 - **Operation**: DynamoDB Stream read
 - **Target**: DDB Stream
-- **Purpose**: Captures new QueueTicket inserts asynchronously. Used to build the time-density map without slowing down the main write path.
+- **Purpose**: Captures new QueueTicket INSERT and SessionItem REMOVE events. Used for building the time-density map and decrementing the session counter on TTL expiry.
 
 ## Pattern 3: Get Global State
 
@@ -23,7 +23,7 @@ This document lists all database operations the system needs. Each pattern was t
 - **Target**: Table
 - **PK**: `EVENT#<EventId>#METADATA`
 - **SK**: `METADATA`
-- **Purpose**: Reads the current admission watermark and time-density map. This data is cached at the edge (CloudFront) to handle millions of user polling requests.
+- **Purpose**: Reads the current admission watermark, active session count, and time-density map. This data is cached at the edge (CloudFront) to handle millions of user polling requests.
 
 ## Pattern 4: Move Watermark Forward
 
@@ -33,30 +33,46 @@ This document lists all database operations the system needs. Each pattern was t
 - **SK**: `METADATA`
 - **Purpose**: Advances the `AdmittedUntilTimestamp` to promote the next batch of users. This is the only write needed to promote thousands of users (passive promotion).
 
-## Pattern 5: Monitor Active Slots
+## Pattern 5: Get Active Session Count (Reconciliation)
 
 - **Operation**: Query
+- **Target**: GSI (SessionMetadataIndex)
+- **GSIPK**: `EVENT#<EventId>#SESSION_META`
+- **Purpose**: Returns all active session keys to count current checkout users. Used by the reconciliation Lambda that runs every 5 minutes to correct counter drift. Costs very little since sessions are capped at 1000.
+
+## Pattern 6: Claim Checkout Slot
+
+- **Operation**: PutItem (session item) + UpdateItem (counter)
 - **Target**: Table
-- **PK**: `EVENT#<EventId>#ACTIVE_SLOTS`
-- **Condition**: None
-- **Purpose**: Reads all 1000 checkout slots to see how many are free. Runs every 1-2 seconds to keep the checkout flow full.
+- **Step 1**: PutItem with `PK = EVENT#<Id>#SESSION#<FanId>`, `SK = SESSION`, `ExpiresAt = <now + 5min>`, `GSIPK = EVENT#<Id>#SESSION_META`
+- **Step 2**: UpdateItem on GlobalState: `ADD ActivePurchaserCount 1` with condition `ActivePurchaserCount < 1000`
+- **Rollback**: If step 2 fails (counter at 1000), delete the session item created in step 1
+- **Purpose**: Dynamically creates a checkout session and increments the counter. Writes are naturally distributed since each session has a unique PK.
 
-## Pattern 6: Claim an Active Slot
+## Pattern 7: Release Checkout Slot (Manual)
 
-- **Operation**: UpdateItem
+- **Operation**: DeleteItem (session) + UpdateItem (counter)
 - **Target**: Table
-- **PK**: `EVENT#<EventId>#ACTIVE_SLOTS`
-- **SK**: `SLOT#<SlotId>`
-- **Condition**: `attribute_not_exists(ActiveUserId) OR ExpiresAt < :now`
-- **Purpose**: Assigns a checkout slot to a user. The condition prevents two users from taking the same slot.
+- **Step 1**: DeleteItem on `PK = EVENT#<Id>#SESSION#<FanId>`, `SK = SESSION`
+- **Step 2**: UpdateItem on GlobalState: `ADD ActivePurchaserCount -1`
+- **Purpose**: Frees a slot when a user completes checkout.
 
-## Pattern 7: Release an Active Slot
+## Pattern 8: TTL Auto-Release (Stream Triggered)
 
-- **Operation**: UpdateItem
-- **Target**: Table
-- **PK**: `EVENT#<EventId>#ACTIVE_SLOTS`
-- **SK**: `SLOT#<SlotId>`
-- **Purpose**: Frees a slot when a user completes checkout or their session expires. Uses `REMOVE` on `ActiveUserId`.
+- **Operation**: Stream REMOVE event → Lambda handler
+- **Target**: DynamoDB Stream
+- **Trigger**: DynamoDB TTL deletes an expired SessionItem
+- **Action**: Stream Aggregator Lambda detects REMOVE event where `userIdentity` is TTL, then decrements `ActivePurchaserCount` on GlobalState
+- **Purpose**: Self-healing cleanup for abandoned sessions. No custom cron work needed.
+
+## Pattern 9: Counter Drift Correction (Reconciliation)
+
+- **Operation**: Query GSI + UpdateItem
+- **Target**: GSI + Table
+- **Frequency**: Every 5 minutes
+- **Step 1**: Query `SessionMetadataIndex` at `GSIPK = EVENT#<Id>#SESSION_META`, count results
+- **Step 2**: UpdateItem on GlobalState to set `ActivePurchaserCount` to the actual count
+- **Purpose**: Corrects any counter drift from missed TTL events or duplicate stream processing.
 
 ## Access Pattern Summary
 
@@ -66,6 +82,8 @@ This document lists all database operations the system needs. Each pattern was t
 | 2 | Stream read | Stream read | Real-time |
 | 3 | Get global state | GetItem | Millions/sec (cached) |
 | 4 | Move watermark | UpdateItem | 1/sec |
-| 5 | Monitor slots | Query | 1/sec |
-| 6 | Claim slot | UpdateItem (conditional) | 1000/sec (peak) |
-| 7 | Release slot | UpdateItem | 1000/sec (peak) |
+| 5 | Count sessions (reconciliation) | Query GSI | 1/5min |
+| 6 | Claim checkout slot | PutItem + UpdateItem | 1000/sec (peak) |
+| 7 | Release slot (manual) | DeleteItem + UpdateItem | 1000/sec (peak) |
+| 8 | TTL auto-release | Stream trigger | On TTL expiry |
+| 9 | Counter drift correction | Query GSI + UpdateItem | 1/5min |
