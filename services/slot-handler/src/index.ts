@@ -15,7 +15,7 @@ const sm = new SecretsManagerClient();
 const TABLE_NAME = requireEnv('TABLE_NAME');
 const SIGNING_SECRET_ID = requireEnv('SIGNING_SECRET_ID');
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
-const SESSION_TTL_SECONDS = 300; // 5 min
+const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS || '300'); // 5 min
 
 let _tiebreakerKey: string | null = null;
 async function getTiebreakerKey(): Promise<string> {

@@ -10,7 +10,7 @@ function requireEnv(name: string): string {
 const ddb = new DynamoDBClient();
 const TABLE_NAME = requireEnv('TABLE_NAME');
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
-const CACHE_TTL_MS = 2000;
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || '2000');
 
 interface GlobalState {
   admittedUntilTimestamp: number;

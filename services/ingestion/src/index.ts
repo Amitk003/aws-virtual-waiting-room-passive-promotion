@@ -14,8 +14,8 @@ const ddb = new DynamoDBClient();
 const TABLE_NAME = requireEnv('TABLE_NAME');
 const SIGNING_SECRET_ID = requireEnv('SIGNING_SECRET_ID');
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
-const JWT_EXPIRY_SECONDS = 3600; // 1 hour
-const QUEUE_TTL_SECONDS = 86400; // 24 hours — data persists beyond JWT expiry
+const JWT_EXPIRY_SECONDS = Number(process.env.JWT_EXPIRY_SECONDS || '3600'); // 1 hour
+const QUEUE_TTL_SECONDS = Number(process.env.QUEUE_TTL_SECONDS || '86400'); // 24 hours
 
 function validateFanId(fanId: string): boolean {
   return /^[a-zA-Z0-9_-]{1,64}$/.test(fanId);

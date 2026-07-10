@@ -10,7 +10,7 @@ function requireEnv(name: string): string {
 
 const ddb = new DynamoDBClient();
 const TABLE_NAME = requireEnv('TABLE_NAME');
-const CHECKPOINT_TTL_SECONDS = 3600;
+const CHECKPOINT_TTL_SECONDS = Number(process.env.CHECKPOINT_TTL_SECONDS || '3600');
 
 function extractEventId(pk: string): string | null {
   const parts = pk.split('#');

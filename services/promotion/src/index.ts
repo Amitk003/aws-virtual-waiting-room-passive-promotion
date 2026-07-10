@@ -9,8 +9,8 @@ function requireEnv(name: string): string {
 const ddb = new DynamoDBClient();
 const TABLE_NAME = requireEnv('TABLE_NAME');
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
-const MAX_SLOTS = 1000;
-const CACHE_TTL_MS = 2000;
+const MAX_SLOTS = Number(process.env.MAX_SLOTS || '1000');
+const CACHE_TTL_MS = Number(process.env.CACHE_TTL_MS || '2000');
 
 interface CachedDensity {
   timestamp: number;
