@@ -1,12 +1,33 @@
 import { DynamoDBClient, GetItemCommand, DeleteItemCommand, PutItemCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import { createHmac } from 'node:crypto';
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { verifyJwt } from './jwt.js';
 
 const ddb = new DynamoDBClient();
+const sm = new SecretsManagerClient();
 const TABLE_NAME = process.env.TABLE_NAME!;
 const SIGNING_SECRET_ID = process.env.SIGNING_SECRET_ID!;
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const SESSION_TTL_SECONDS = 300; // 5 min
+
+let _tiebreakerKey: string | null = null;
+async function getTiebreakerKey(): Promise<string> {
+  if (_tiebreakerKey) return _tiebreakerKey;
+  const resp = await sm.send(new GetSecretValueCommand({ SecretId: SIGNING_SECRET_ID }));
+  _tiebreakerKey = resp.SecretString || '';
+  return _tiebreakerKey;
+}
+
+function computeTiebreakerValue(fanId: string, entryTimestamp: number, key: string): number {
+  // HMAC-based tiebreaker: client cannot precompute because the key is
+  // server-side only. Incorporates both fanId and entryTimestamp so that
+  // two entries by the same fanId get different tiebreaker values.
+  const hmac = createHmac('sha256', key);
+  hmac.update(`${fanId}:${entryTimestamp}`);
+  const digest = hmac.digest();
+  return digest.readUInt32BE(0) % 100;
+}
 
 function extractBearerToken(event: APIGatewayProxyEventV2): string | null {
   const auth = event.headers?.authorization || event.headers?.Authorization || '';
@@ -40,13 +61,14 @@ function isAdmitted(
   entryTimestamp: number,
   admittedUntilTimestamp: number,
   fanId: string,
-  tieBreakerThreshold: number
+  tieBreakerThreshold: number,
+  tiebreakerValue: number
 ): boolean {
   const entrySec = Math.floor(entryTimestamp / 1000);
   const admittedSec = Math.floor(admittedUntilTimestamp / 1000);
   if (entrySec < admittedSec) return true;
   if (entrySec === admittedSec) {
-    return hashCodeFanId(fanId) % 100 < tieBreakerThreshold;
+    return tiebreakerValue < tieBreakerThreshold;
   }
   return false;
 }
@@ -102,7 +124,9 @@ export async function handler(
       const admittedUntilTimestamp = Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0);
       const tieBreakerThreshold = Number(globalState.Item?.TieBreakerThreshold?.N || 100);
 
-      if (!isAdmitted(jwtPayload.entryTimestamp, admittedUntilTimestamp, fanId, tieBreakerThreshold)) {
+      const tiebreakerKey = await getTiebreakerKey();
+      const tiebreakerValue = computeTiebreakerValue(fanId, jwtPayload.entryTimestamp, tiebreakerKey);
+      if (!isAdmitted(jwtPayload.entryTimestamp, admittedUntilTimestamp, fanId, tieBreakerThreshold, tiebreakerValue)) {
         return {
           statusCode: 403,
           headers: baseHeaders,
