@@ -6,7 +6,8 @@ import { signJwt, JwtPayload } from './jwt.js';
 const ddb = new DynamoDBClient();
 
 const TABLE_NAME = process.env.TABLE_NAME!;
-const KEY_ID = process.env.KEY_ID!;
+const SIGNING_SECRET_ID = process.env.SIGNING_SECRET_ID!;
+const KMS_KEY_ID = process.env.KMS_KEY_ID!;
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const JWT_EXPIRY_SECONDS = 3600; // 1 hour
 
@@ -28,38 +29,55 @@ export async function handler(
 
     // Get precise timestamp (Lambda system clock is synced via AWS Time Sync Service)
     const entryTimestamp = Date.now();
+    const nowSeconds = Math.floor(entryTimestamp / 1000);
+    const expirySeconds = nowSeconds + JWT_EXPIRY_SECONDS;
+
+    // Write tracking item to prevent double-join
+    // PK contains FanId so each user has exactly one tracking item
+    // If Lambda crashes between this write and the QueueTicket write,
+    // TTL auto-cleans the orphaned tracking item within 1 hour
+    const trackingPk = `EVENT#${eventId}#FAN#${fanId}`;
+
+    await ddb.send(new PutItemCommand({
+      TableName: TABLE_NAME,
+      Item: {
+        PK: { S: trackingPk },
+        SK: { S: 'PENDING' },
+        FanId: { S: fanId },
+        ExpiresAt: { N: String(expirySeconds) },
+      },
+      ConditionExpression: 'attribute_not_exists(PK)',
+    }));
 
     // Generate random shard for write distribution
     const shardId = getShardId();
 
     // Write QueueTicket to DynamoDB
-    const pk = `EVENT#${eventId}#SHARD#${shardId}`;
-    const sk = `TS#${entryTimestamp}#FAN#${fanId}`;
+    const queuePk = `EVENT#${eventId}#SHARD#${shardId}`;
+    const queueSk = `TS#${entryTimestamp}#FAN#${fanId}`;
 
     await ddb.send(new PutItemCommand({
       TableName: TABLE_NAME,
       Item: {
-        PK: { S: pk },
-        SK: { S: sk },
+        PK: { S: queuePk },
+        SK: { S: queueSk },
         FanId: { S: fanId },
         EntryTimestamp: { N: String(entryTimestamp) },
         ShardId: { N: String(shardId) },
-        ExpiresAt: { N: String(Math.floor(entryTimestamp / 1000) + JWT_EXPIRY_SECONDS) },
+        ExpiresAt: { N: String(expirySeconds) },
       },
-      ConditionExpression: 'attribute_not_exists(PK)',
     }));
 
-    // Sign JWT with user's queue position
-    const now = Math.floor(entryTimestamp / 1000);
+    // Sign JWT locally using cached ECC key (no KMS call in hot path)
     const jwtPayload: JwtPayload = {
       fanId,
       entryTimestamp,
       shardId,
-      iat: now,
-      exp: now + JWT_EXPIRY_SECONDS,
+      iat: nowSeconds,
+      exp: expirySeconds,
     };
 
-    const token = await signJwt(jwtPayload, KEY_ID);
+    const token = await signJwt(jwtPayload, SIGNING_SECRET_ID, KMS_KEY_ID);
 
     return {
       statusCode: 200,
@@ -68,7 +86,7 @@ export async function handler(
         token,
         entryTimestamp,
         shardId,
-        queuePosition: null, // Will be computed client-side
+        queuePosition: null,
       }),
     };
   } catch (error: any) {

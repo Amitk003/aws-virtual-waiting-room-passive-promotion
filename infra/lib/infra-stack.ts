@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
@@ -28,16 +29,29 @@ export class InfraStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.KEYS_ONLY,
     });
 
-    // --- KMS Asymmetric Key for JWT Signing ---
+    // --- KMS Asymmetric Key for JWT Public Key Retrieval ---
+    // The KMS key is used ONLY for getting the public key (for edge authorizers).
+    // JWT signing is done locally using a key from Secrets Manager to avoid
+    // KMS API throttling at 1M requests/sec.
 
     const signingKey = new kms.Key(this, 'JwtSigningKey', {
       keySpec: kms.KeySpec.ECC_NIST_P256,
       keyUsage: kms.KeyUsage.SIGN_VERIFY,
-      description: 'Asymmetric key for signing JWT tokens in the Virtual Waiting Room',
+      description: 'Key for JWT public key retrieval at the edge',
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       pendingWindow: cdk.Duration.days(7),
     });
     signingKey.addAlias(`alias/virtual-waiting-room-jwt-signing-${this.stackName}`);
+
+    // --- Secrets Manager Secret for Local JWT Signing ---
+    // Stores the ECC P-256 private key (PKCS#8 PEM format).
+    // The first deploy creates an empty secret.
+    // Run scripts/generate-key.js after deploy to populate it.
+
+    const signingSecret = new secretsmanager.Secret(this, 'JwtSigningSecret', {
+      description: 'ECC P-256 private key for local JWT signing in the Ingestion Lambda',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
 
     // --- Ingestion Lambda ---
 
@@ -54,7 +68,8 @@ export class InfraStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(10),
       environment: {
         TABLE_NAME: table.tableName,
-        KEY_ID: signingKey.keyId,
+        SIGNING_SECRET_ID: signingSecret.secretName,
+        KMS_KEY_ID: signingKey.keyId,
       },
       bundling: {
         target: 'es2022',
@@ -64,7 +79,8 @@ export class InfraStack extends cdk.Stack {
     });
 
     table.grantWriteData(ingestionFn);
-    signingKey.grantSign(ingestionFn);
+    signingKey.grant(ingestionFn, 'kms:GetPublicKey');
+    signingSecret.grantRead(ingestionFn);
 
     // Provisioned concurrency for cold-start mitigation
     // Uncomment and set desired count before the event
@@ -107,14 +123,14 @@ export class InfraStack extends cdk.Stack {
       description: 'DynamoDB table ARN',
     });
 
-    new cdk.CfnOutput(this, 'SigningKeyId', {
+    new cdk.CfnOutput(this, 'KmsKeyId', {
       value: signingKey.keyId,
-      description: 'KMS signing key ID',
+      description: 'KMS key ID (for public key retrieval)',
     });
 
-    new cdk.CfnOutput(this, 'SigningKeyArn', {
-      value: signingKey.keyArn,
-      description: 'KMS signing key ARN',
+    new cdk.CfnOutput(this, 'SigningSecretName', {
+      value: signingSecret.secretName,
+      description: 'Secrets Manager secret name (populate via scripts/generate-key.js after deploy)',
     });
 
     new cdk.CfnOutput(this, 'IngestionApiUrl', {

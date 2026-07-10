@@ -45,21 +45,36 @@ POST /api/v1/event/{eventId}/join
 
 ## How it works
 
-1. User sends their fan ID (email, username, or internal ID)
-2. Lambda gets the current time (microsecond precision via AWS Time Sync)
-3. A random shard ID (1-2000) is generated to spread writes across DynamoDB partitions
-4. A QueueTicket item is written to DynamoDB
-5. A JWT is signed using the KMS asymmetric key (ECC P-256)
-6. The JWT contains the fan ID, entry timestamp, and expiration
-7. The token is returned to the user for subsequent polling
+1. User sends their fan ID
+2. Lambda writes a tracking item (PK = `EVENT#<id>#FAN#<fanId>`) to prevent double-join
+3. If tracking item write fails (user already exists), returns 409
+4. Lambda gets the current time (microsecond precision via AWS Time Sync)
+5. A random shard ID (1-2000) is generated to spread writes across DynamoDB partitions
+6. A QueueTicket item is written to DynamoDB with sharded PK
+7. A JWT is signed locally using the ECC P-256 key (cached in memory from Secrets Manager)
+8. The JWT is returned to the user for subsequent polling
 
 ## Key design points
 
-**Shard distribution**: The partition key uses a random shard suffix (`SHARD#<1-2000>`). This spreads 1M writes/second evenly across DynamoDB partitions (500 writes/sec per partition, well below the 1000 WCU limit).
+**Double-join prevention**: A tracking item is written first with PK = `EVENT#<eventId>#FAN#<fanId>`. If the user already has a tracking item, the write fails and they get a 409 response. The tracking item has an ExpiresAt TTL so orphaned items (from Lambda crashes between the two writes) auto-expire.
 
-**JWT signing**: Uses KMS asymmetric key (ECC_NIST_P256) with ES256 algorithm. For production at 1M scale, the private key can be cached from Secrets Manager to avoid KMS API throttling.
+**Shard distribution**: The QueueTicket partition key uses a random shard suffix (`SHARD#<1-2000>`). This spreads 1M writes/second evenly across DynamoDB partitions (500 writes/sec per partition, well below the 1000 WCU limit).
+
+**JWT signing (local, no KMS API call)**: The ECC P-256 private key is stored in AWS Secrets Manager. The Lambda fetches the key once at cold start and caches it in memory. All subsequent invocations sign JWTs locally using the `jose` library. This avoids KMS API throttling at 1M requests/sec. KMS is only used for `GetPublicKey` (retrieving the public key for edge authorizers).
+
+**JWT format**: ES256 algorithm (ECDSA P-256). The `kid` header contains the KMS key ID so edge verifiers can fetch the matching public key.
 
 **Provisioned Concurrency**: Uncomment the alias block in the CDK stack before the event to pre-warm Lambda containers and eliminate cold starts.
+
+## Deployment steps
+
+After first `cdk deploy`, you need to populate the signing key:
+
+```bash
+node scripts/generate-key.js <SigningSecretName>
+```
+
+This generates an ECC P-256 key pair and stores the private key in Secrets Manager.
 
 ## Local development
 
@@ -75,7 +90,7 @@ npm test
 services/ingestion/
   src/
     index.ts    - Lambda handler
-    jwt.ts      - JWT signing
+    jwt.ts      - JWT signing (local jose library, no KMS in hot path)
     shard.ts    - Shard calculation
   test/
     ingestion.test.ts

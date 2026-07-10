@@ -189,3 +189,25 @@ Notes:
 - Table name and key ID passed via environment variables
 - projectRoot set to repo root for cross-directory Lambda bundling
 - API Gateway uses HTTP API (v2) for lower latency and cost
+
+### 2026-07-10 - Bug fix: DER signature format, KMS hot path, double-join check
+
+Commands ran:
+- `npm install` (in services/ingestion/) - Added jose and @aws-sdk/client-secrets-manager
+- `npx cdk synth` - Verified CloudFormation (bundled jose into Lambda, 39.7kb)
+
+Files changed:
+- `services/ingestion/src/jwt.ts` - Complete rewrite
+- `services/ingestion/src/index.ts` - Added tracking item write
+- `services/ingestion/package.json` - Added jose and secrets-manager deps
+- `infra/lib/infra-stack.ts` - Added Secrets Manager secret, changed KMS grant to GetPublicKey
+- `scripts/generate-key.js` - New file for key generation
+- `docs/ingestion-service.md` - Updated docs
+
+Bug fixes applied:
+
+1. DER vs P1363 signature format: Removed raw KMS Sign call. KMS returned ASN.1 DER but JWT/ES256 requires IEEE P1363 (raw R||S). Switched to local signing with `jose` library which handles P1363 correctly.
+
+2. KMS hot path: Removed `kms:Sign` from Lambda. JWTs are now signed locally using a cached ECC P-256 private key loaded from Secrets Manager. KMS is only used for `kms:GetPublicKey` (authorizer needs the public key). This eliminates KMS API throttling at 1M requests/sec.
+
+3. Double-join check: Added tracking item write with PK = `EVENT#<eventId>#FAN#<fanId>` and condition `attribute_not_exists(PK)`. If the condition fails, returns 409. The tracking item has ExpiresAt TTL so orphaned items auto-clean if Lambda crashes between the two writes.
