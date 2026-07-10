@@ -131,6 +131,7 @@ export class InfraStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(10),
       environment: {
         TABLE_NAME: table.tableName,
+        EVENT_ID: 'match2026',
       },
       bundling: {
         target: 'es2022',
@@ -158,6 +159,7 @@ export class InfraStack extends cdk.Stack {
       environment: {
         TABLE_NAME: table.tableName,
         SIGNING_SECRET_ID: signingSecret.secretName,
+        EVENT_ID: 'match2026',
       },
       bundling: {
         target: 'es2022',
@@ -183,6 +185,7 @@ export class InfraStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(30),
       environment: {
         TABLE_NAME: table.tableName,
+        EVENT_ID: 'match2026',
       },
       bundling: {
         target: 'es2022',
@@ -213,6 +216,7 @@ export class InfraStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(60),
       environment: {
         TABLE_NAME: table.tableName,
+        EVENT_ID: 'match2026',
       },
       bundling: {
         target: 'es2022',
