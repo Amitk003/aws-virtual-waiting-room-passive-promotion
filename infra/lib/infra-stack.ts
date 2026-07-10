@@ -200,7 +200,7 @@ export class InfraStack extends cdk.Stack {
       runtime: lambda.Runtime.NODEJS_22_X,
       architecture: lambda.Architecture.ARM_64,
       memorySize: 256,
-      timeout: cdk.Duration.seconds(5),
+      timeout: cdk.Duration.seconds(60),
       environment: {
         TABLE_NAME: table.tableName,
       },

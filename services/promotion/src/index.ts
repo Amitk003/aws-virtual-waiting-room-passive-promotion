@@ -66,7 +66,7 @@ export async function handler(): Promise<void> {
   // advance the watermark multiple times per invocation.
   // Timeout is 5s, giving us ~4 iterations at 1s intervals.
   const startTime = Date.now();
-  const timeoutMs = 4500;
+  const timeoutMs = 58000;
   let iteration = 0;
 
   while (Date.now() - startTime < timeoutMs) {
@@ -123,6 +123,7 @@ export async function handler(): Promise<void> {
           SK: { S: 'METADATA' },
         },
         UpdateExpression: 'SET AdmittedUntilTimestamp = :newWatermark',
+        ConditionExpression: 'attribute_not_exists(AdmittedUntilTimestamp) OR AdmittedUntilTimestamp < :newWatermark',
         ExpressionAttributeValues: {
           ':newWatermark': { N: String(newWatermarkMs) },
         },
