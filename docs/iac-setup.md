@@ -8,6 +8,12 @@ This folder contains the AWS CDK v2 (TypeScript) project that defines all cloud 
 |----------|------|---------|
 | DynamoDB Table | `AWS::DynamoDB::Table` | Main data store (single-table design) |
 | Secrets Manager Secret | `AWS::SecretsManager::Secret` | ECC P-256 key pair for JWT signing |
+| Lambda (Ingestion) | `AWS::Lambda::Function` | Ingestion handler (POST /join) |
+| Lambda (Aggregator) | `AWS::Lambda::Function` | Streams aggregator (density + TTL) |
+| Lambda (Status) | `AWS::Lambda::Function` | Status polling handler (GET /status) |
+| API Gateway | `AWS::ApiGatewayV2::Api` | HTTP API for ingestion + status |
+| CloudFront | `AWS::CloudFront::Distribution` | CDN with edge caching for status |
+| Cache Policy | `AWS::CloudFront::CachePolicy` | 2s TTL per-user caching |
 
 ## Stack resources
 
@@ -59,4 +65,7 @@ This keeps the base template deployable without account limit issues.
 - Secrets Manager secret removal policy: Change to RETAIN for production so the signing key is not destroyed on stack deletion
 - Stream Aggregator timeout: 60s (must be high enough to handle batch processing)
 - DynamoDB event source retry: 3 attempts, then records go to DLQ
+- CloudFront cache policy: Tune default/max TTL based on polling frequency
+- API Gateway: Monitoring and throttling should be configured for production
+- Custom domain: Add a custom domain to CloudFront with a certificate for production
 - Table name: A hardcoded table name can be added if needed, but auto-generated names prevent conflicts across environments

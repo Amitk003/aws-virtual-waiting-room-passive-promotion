@@ -7,6 +7,8 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigwIntegrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as path from 'node:path';
 
 export class InfraStack extends cdk.Stack {
@@ -30,9 +32,6 @@ export class InfraStack extends cdk.Stack {
     });
 
     // --- Secrets Manager Secret for JWT Signing ---
-    // Stores both the private key (for signing) and the public key (for verification).
-    // Both are generated locally and stored in the same secret to ensure they match.
-    // Run scripts/generate-key.js after the first deploy to populate this secret.
 
     const signingSecret = new secretsmanager.Secret(this, 'JwtSigningSecret', {
       description: 'ECC P-256 key pair for local JWT signing (private + public key)',
@@ -76,9 +75,6 @@ export class InfraStack extends cdk.Stack {
     // });
 
     // --- Stream Aggregator Lambda ---
-    // Processes DynamoDB Stream events for:
-    // 1. QueueTicket INSERT: aggregates per-second density counts (TimeDensityMap)
-    // 2. SessionItem REMOVE (TTL): decrements ActivePurchaserCount
 
     const aggregatorFn = new lambdaNodejs.NodejsFunction(this, 'StreamAggregator', {
       entry: path.join(projectRoot, 'services', 'aggregator', 'src', 'index.ts'),
@@ -107,12 +103,39 @@ export class InfraStack extends cdk.Stack {
       retryAttempts: 3,
     }));
 
+    // --- Status Polling Lambda ---
+    // Verifies JWT and returns admission status and queue position.
+    // Reads GlobalState and queries all 20 DensityBucket shards in parallel.
+
+    const statusFn = new lambdaNodejs.NodejsFunction(this, 'StatusHandler', {
+      entry: path.join(projectRoot, 'services', 'status-api', 'src', 'index.ts'),
+      projectRoot,
+      depsLockFilePath: path.join(projectRoot, 'services', 'status-api', 'package-lock.json'),
+      handler: 'handler',
+      runtime: lambda.Runtime.NODEJS_22_X,
+      architecture: lambda.Architecture.ARM_64,
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(10),
+      environment: {
+        TABLE_NAME: table.tableName,
+        SIGNING_SECRET_ID: signingSecret.secretName,
+      },
+      bundling: {
+        target: 'es2022',
+        format: lambdaNodejs.OutputFormat.ESM,
+        sourceMap: true,
+      },
+    });
+
+    table.grantReadData(statusFn);
+    signingSecret.grantRead(statusFn);
+
     // --- API Gateway HTTP API ---
 
-    const api = new apigwv2.HttpApi(this, 'IngestionApi', {
-      apiName: 'VirtualWaitingRoom-Ingestion',
+    const api = new apigwv2.HttpApi(this, 'WaitingRoomApi', {
+      apiName: 'VirtualWaitingRoom-Api',
       corsPreflight: {
-        allowMethods: [apigwv2.CorsHttpMethod.POST],
+        allowMethods: [apigwv2.CorsHttpMethod.GET, apigwv2.CorsHttpMethod.POST],
         allowOrigins: ['*'],
         allowHeaders: ['content-type', 'authorization'],
       },
@@ -125,6 +148,57 @@ export class InfraStack extends cdk.Stack {
         'IngestionIntegration',
         ingestionFn
       ),
+    });
+
+    api.addRoutes({
+      path: '/api/v1/event/{eventId}/status',
+      methods: [apigwv2.HttpMethod.GET],
+      integration: new apigwIntegrations.HttpLambdaIntegration(
+        'StatusIntegration',
+        statusFn
+      ),
+    });
+
+    // --- CloudFront CDN ---
+    // Caches status responses at the edge for reduced latency.
+    // Cache key includes the Authorization header (per-user caching).
+    // The ingestion POST endpoint is proxied without caching.
+
+    const cachePolicy = new cloudfront.CachePolicy(this, 'StatusCachePolicy', {
+      cachePolicyName: 'StatusPolicy',
+      comment: 'Short TTL for status polling, per-user via Authorization header',
+      defaultTtl: cdk.Duration.seconds(2),
+      maxTtl: cdk.Duration.seconds(5),
+      minTtl: cdk.Duration.seconds(0),
+      cookieBehavior: cloudfront.CacheCookieBehavior.none(),
+      headerBehavior: cloudfront.CacheHeaderBehavior.allowList('Authorization'),
+      queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
+      enableAcceptEncodingGzip: true,
+    });
+
+    const distribution = new cloudfront.Distribution(this, 'CdnDistribution', {
+      defaultBehavior: {
+        origin: new origins.HttpOrigin(cdk.Fn.select(2, cdk.Fn.split('/', api.url!)), {
+          originId: 'api-origin',
+          protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+        }),
+        cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      },
+      additionalBehaviors: {
+        '/api/v1/event/*/status': {
+          origin: new origins.HttpOrigin(cdk.Fn.select(2, cdk.Fn.split('/', api.url!)), {
+            originId: 'api-origin-status',
+            protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+          }),
+          cachePolicy,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        },
+      },
+      defaultRootObject: '',
+      priceClass: cloudfront.PriceClass.PRICE_CLASS_100,
     });
 
     // --- Outputs ---
@@ -147,6 +221,11 @@ export class InfraStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'IngestionApiUrl', {
       value: api.url!,
       description: 'API Gateway URL for the ingestion endpoint',
+    });
+
+    new cdk.CfnOutput(this, 'CdnUrl', {
+      value: distribution.distributionDomainName,
+      description: 'CloudFront distribution URL (primary endpoint for clients)',
     });
   }
 }

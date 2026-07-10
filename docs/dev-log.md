@@ -267,3 +267,49 @@ Aggregator design:
 - QueueTicket INSERT events: Extracts eventId and entryTimestamp, accumulates per-second count per bucket in memory, flushes via atomic `ADD Count :inc` on DensityBucket items (`EVENT#<id>#DENSITY`, SK = `BUCKET#<ts>`)
 - SessionItem REMOVE (TTL) events: Decrements `ActivePurchaserCount` on GlobalState via `ADD ActivePurchaserCount :dec`
 - DensityBucket replaces the old TimeDensityMap JSON attribute on GlobalState, enabling safe concurrent writes from multiple shard aggregators
+
+### 2026-07-10 - Fix: double-decrement guard + randomized density shard
+
+Files changed:
+- `services/aggregator/src/index.ts` - Two fixes:
+  1. Added `record.userIdentity` check to skip non-TTL REMOVE events on sessions (prevents double-decrement)
+  2. Changed density shard from `bucketTs % 20` to `Math.random() * 20` (prevents hopping hot partition)
+
+---
+
+## Branch: feature/phase-5-status-api
+
+### 2026-07-10 - Status Polling API and CloudFront CDN
+
+Commands ran:
+- Created `services/status-api/` project directory
+- `npm install` in services/status-api/ - Installed deps (35 packages)
+- `npx tsc --noEmit` - Verified TypeScript compilation
+- `npx cdk synth` - Generated CloudFormation (status bundle 44.7kb including jose)
+
+Files created:
+- `services/status-api/package.json` - Node.js project config
+- `services/status-api/tsconfig.json` - TypeScript config
+- `services/status-api/src/index.ts` - Status handler Lambda
+- `services/status-api/src/jwt.ts` - JWT verification utility
+- `docs/status-service.md` - Status API documentation
+
+Files modified:
+- `infra/lib/infra-stack.ts` - Added StatusHandler Lambda, status API route, CloudFront CDN; renamed API to WaitingRoomApi
+- `docs/iac-setup.md` - Added new resources to table, updated production considerations
+- `docs/dev-log.md` - This entry
+
+New stack resources:
+- Lambda: StatusHandler (Node.js 22, ARM64, 256MB, 10s timeout)
+- API Route: GET /api/v1/event/{eventId}/status
+- CloudFront Distribution: CDN with per-user caching (2s TTL) on status endpoint
+- Cache Policy: Whitelists Authorization header for per-user cache key
+- IAM: Auto-created role with DynamoDB read + Secrets Manager read permissions
+
+Status API design:
+- Validates JWT locally using cached public key from Secrets Manager (jose library)
+- Reads GlobalState to get AdmittedUntilTimestamp and ActivePurchaserCount
+- If admitted, returns immediately with `admitted: true`
+- If waiting, queries all 20 DensityBucket shards in parallel, merges counts, calculates queue position
+- Returns estimated wait time based on queue position and active purchaser count
+- CloudFront caches status responses per-user (Authorization header in cache key) with 2-second default TTL
