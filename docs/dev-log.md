@@ -448,6 +448,18 @@ Files changed:
 
 ---
 
+### 2026-07-10 - Code review fix round: TransactWriteItems, counter guard, density sharding, tests
+
+Commit 1 (atomic ingest): Converted two-phase PutItem (tracking + QueueTicket) to TransactWriteItems. No orphaned items on crash. Fixed sample data tracking key from TRACKING to FAN prefix to match code.
+
+Commit 2 (slot + validation): Added ConditionExpression 'ActivePurchaserCount > :zero' on release decrement. Added fanId regex validation (alphanumeric, underscore, hyphen, max 64 chars). Added x-request-id correlation header to all API responses.
+
+Commit 3 (aggregator resilience): Density PK sharded across 10 sub-partitions (EVENT#<id>#DENSITY#SHARD#<bucketTs % 10>). Read paths (status-api, promotion) query all 10 in parallel. Switched Promise.all to Promise.allSettled with per-error logging. Added SQS DLQ for stream event source mapping.
+
+Commit 4 (promotion + docs): Internal loop timeout 58000 → 59000. EWT completion rate factor moved to COMPLETION_RATE_FACTOR env var. Architecture doc: removed AWS Time Sync Service claims, removed client-side EWT claims, replaced with honest description of Date.now() and server-side EWT. Updated all service docs to match.
+
+Commit 5 (tests): 47 unit tests across 3 test files — admission boundary cases (isAdmitted with second-granularity, tie-breaking), queue position calculation, EWT estimate, hashCodeFanId determinism, fanId validation, aggregator buffer accumulation, density shard distribution, TTL counter grouping.
+
 ### 2026-07-10 - Remediation: tie-breaking ms/s mismatch, GSI sort key, scripts, docs
 
 Commit 1: Tie-breaking now compares entryTimestamp and watermark at second granularity (Math.floor both to seconds before equality check). Affected status-api and slot-handler.
