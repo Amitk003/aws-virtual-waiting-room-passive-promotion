@@ -1,5 +1,6 @@
-import { DynamoDBClient, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, TransactWriteItemsCommand } from '@aws-sdk/client-dynamodb';
 import { DynamoDBStreamEvent, DynamoDBStreamHandler } from 'aws-lambda';
+import { createHash } from 'node:crypto';
 
 function requireEnv(name: string): string {
   const val = process.env[name];
@@ -9,6 +10,7 @@ function requireEnv(name: string): string {
 
 const ddb = new DynamoDBClient();
 const TABLE_NAME = requireEnv('TABLE_NAME');
+const CHECKPOINT_TTL_SECONDS = 3600;
 
 function extractEventId(pk: string): string | null {
   const parts = pk.split('#');
@@ -18,52 +20,15 @@ function extractEventId(pk: string): string | null {
   return null;
 }
 
-function flush(
-  buffer: Array<{ eventId: string; bucketTs: string; count: number }>,
-  ttlCounters: Map<string, number>
-): Promise<any>[] {
-  const promises: Promise<any>[] = [];
-
-  for (const entry of buffer) {
-    // Deterministic shard assignment using string hash to avoid hotspotting
-    let hash = 5381;
-    for (let i = 0; i < entry.bucketTs.length; i++) {
-      hash = ((hash << 5) + hash) + entry.bucketTs.charCodeAt(i);
-    }
-    const shard = Math.abs(hash) % 10;
-    promises.push(ddb.send(new UpdateItemCommand({
-      TableName: TABLE_NAME,
-      Key: {
-        PK: { S: `EVENT#${entry.eventId}#DENSITY#SHARD#${shard}` },
-        SK: { S: `BUCKET#${entry.bucketTs}` },
-      },
-      UpdateExpression: 'ADD #count :inc',
-      ExpressionAttributeNames: { '#count': 'Count' },
-      ExpressionAttributeValues: { ':inc': { N: String(entry.count) } },
-    })));
-  }
-
-  for (const [eventId, count] of ttlCounters) {
-    promises.push(ddb.send(new UpdateItemCommand({
-      TableName: TABLE_NAME,
-      Key: {
-        PK: { S: `EVENT#${eventId}#METADATA` },
-        SK: { S: 'METADATA' },
-      },
-      UpdateExpression: 'ADD ActivePurchaserCount :dec',
-      ExpressionAttributeValues: { ':dec': { N: String(-count) } },
-    })));
-  }
-
-  return promises;
-}
-
 export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent) => {
   const densityByBucket = new Map<string, number>();
   const ttlCounters = new Map<string, number>();
+  let sequenceInput = '';
 
   for (const record of event.Records) {
-    // QueueTicket INSERT: aggregate per-second density
+    const seq = record.dynamodb?.SequenceNumber || '';
+    sequenceInput += seq;
+
     if (record.eventName === 'INSERT' && record.dynamodb?.NewImage) {
       const pk = record.dynamodb.NewImage.PK?.S || '';
       const sk = record.dynamodb.NewImage.SK?.S || '';
@@ -73,15 +38,12 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
         const eventId = extractEventId(pk);
         if (!eventId) continue;
 
-        const bucketTs = String(Math.floor(parseInt(entryTimestamp) / 1000));
+        const bucketTs = String(Math.floor(parseInt(entryTimestamp, 10) / 1000));
         const key = `${eventId}#${bucketTs}`;
         densityByBucket.set(key, (densityByBucket.get(key) || 0) + 1);
       }
     }
 
-    // SessionItem REMOVE: only process TTL-driven expirations
-    // Manual DeleteItem from the Slot Handler already decrements the counter,
-    // so we must skip those to avoid double-decrement.
     if (
       record.eventName === 'REMOVE' &&
       record.dynamodb?.OldImage &&
@@ -99,19 +61,80 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
     }
   }
 
-  const buffer: Array<{ eventId: string; bucketTs: string; count: number }> = [];
+  if (densityByBucket.size === 0 && ttlCounters.size === 0) return;
+
+  // Compute idempotent batch fingerprint from all sequence numbers
+  const batchId = createHash('sha256').update(sequenceInput).digest('hex').slice(0, 16);
+  const checkpointPk = `STREAM_CHECKPOINT`;
+  const nowSeconds = Math.floor(Date.now() / 1000);
+
+  const transactItems: any[] = [];
+
+  // Claim this batch with a condition — if it already exists, the entire
+  // transaction is aborted and we skip. This makes retries idempotent.
+  transactItems.push({
+    Put: {
+      TableName: TABLE_NAME,
+      Item: {
+        PK: { S: checkpointPk },
+        SK: { S: batchId },
+        ExpiresAt: { N: String(nowSeconds + CHECKPOINT_TTL_SECONDS) },
+      },
+      ConditionExpression: 'attribute_not_exists(PK)',
+    },
+  });
+
   for (const [key, count] of densityByBucket) {
     const [eventId, bucketTs] = key.split('#');
-    buffer.push({ eventId: eventId!, bucketTs: bucketTs!, count });
+    if (!eventId || !bucketTs) continue;
+
+    let hash = 5381;
+    for (let i = 0; i < bucketTs.length; i++) {
+      hash = ((hash << 5) + hash) + bucketTs.charCodeAt(i);
+    }
+    const shard = Math.abs(hash) % 10;
+
+    transactItems.push({
+      Update: {
+        TableName: TABLE_NAME,
+        Key: {
+          PK: { S: `EVENT#${eventId}#DENSITY#SHARD#${shard}` },
+          SK: { S: `BUCKET#${bucketTs}` },
+        },
+        UpdateExpression: 'ADD #count :inc',
+        ExpressionAttributeNames: { '#count': 'Count' },
+        ExpressionAttributeValues: { ':inc': { N: String(count) } },
+      },
+    });
   }
 
-  const promises = flush(buffer, ttlCounters);
-  if (promises.length > 0) {
-    const results = await Promise.allSettled(promises);
-    for (let i = 0; i < results.length; i++) {
-      if (results[i].status === 'rejected') {
-        console.error('Aggregator write failed:', (results[i] as PromiseRejectedResult).reason);
+  for (const [eventId, count] of ttlCounters) {
+    transactItems.push({
+      Update: {
+        TableName: TABLE_NAME,
+        Key: {
+          PK: { S: `EVENT#${eventId}#METADATA` },
+          SK: { S: 'METADATA' },
+        },
+        UpdateExpression: 'ADD ActivePurchaserCount :dec',
+        ExpressionAttributeValues: { ':dec': { N: String(-count) } },
+      },
+    });
+  }
+
+  try {
+    await ddb.send(new TransactWriteItemsCommand({
+      TransactItems: transactItems,
+    }));
+  } catch (err: any) {
+    if (err.name === 'TransactionCanceledException') {
+      const reasons = err.CancellationReasons || [];
+      if (reasons[0]?.Code === 'ConditionalCheckFailed') {
+        // Batch was already processed by a prior invocation — safe to skip
+        console.log(`Skipping already-processed batch ${batchId}`);
+        return;
       }
     }
+    throw err;
   }
 };
