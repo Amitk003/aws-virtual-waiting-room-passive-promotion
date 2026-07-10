@@ -41,6 +41,17 @@ if (mode === 'provisioned') {
       ReadCapacityUnits: rcu,
       WriteCapacityUnits: wcu,
     },
+    GlobalSecondaryIndexUpdates: [
+      {
+        Update: {
+          IndexName: 'SessionMetadataIndex',
+          ProvisionedThroughput: {
+            ReadCapacityUnits: rcu,
+            WriteCapacityUnits: wcu,
+          },
+        },
+      },
+    ],
   }));
 
   console.log(`Switched ${tableName} to PROVISIONED (WCU: ${wcu}, RCU: ${rcu})`);

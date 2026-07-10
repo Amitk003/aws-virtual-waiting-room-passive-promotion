@@ -6,7 +6,7 @@
  * Example: node scripts/generate-key.js JwtSigningSecret us-east-1
  */
 
-import { crypto } from 'node:crypto';
+import * as crypto from 'node:crypto';
 import { SecretsManagerClient, PutSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 
 const secretName = process.argv[2];
@@ -25,6 +25,7 @@ const { privateKey, publicKey } = crypto.generateKeyPairSync('ec', {
 });
 
 const secretValue = JSON.stringify({
+  kid: 'vwr-v1',
   privateKey: privateKey.trim(),
   publicKey: publicKey.trim(),
 });

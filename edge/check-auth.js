@@ -18,7 +18,8 @@ function handler(event) {
         'content-type': { value: 'application/json' },
         'access-control-allow-origin': { value: '*' },
       },
-      body: JSON.stringify({ error: 'Missing or invalid Authorization header' }),
+      body: '{"error":"Missing or invalid Authorization header"}',
+      bodyEncoding: 'text',
     };
   }
 
