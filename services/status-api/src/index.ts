@@ -1,44 +1,25 @@
 import { DynamoDBClient, GetItemCommand, QueryCommand } from '@aws-sdk/client-dynamodb';
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
-import { verifyJwt, JwtPayload } from './jwt.js';
 
 const ddb = new DynamoDBClient();
 const TABLE_NAME = process.env.TABLE_NAME!;
-const SIGNING_SECRET_ID = process.env.SIGNING_SECRET_ID!;
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
-// Global-scope in-memory cache: the density map and GlobalState are
-// identical for all users in the same event. This avoids hammering
-// DynamoDB with reads.
 const CACHE_TTL_MS = 2000;
-const COMPLETION_RATE_FACTOR = parseFloat(process.env.COMPLETION_RATE_FACTOR || '0.01');
 
-interface CachedState {
-  timestamp: number;
+interface GlobalState {
   admittedUntilTimestamp: number;
   tieBreakerThreshold: number;
   activePurchaserCount: number;
-  densityBuckets: DensityBucket[];
+  densityBuckets: Array<{ bucketTs: number; count: number }>;
 }
 
-interface DensityBucket {
-  bucketTs: number;
-  count: number;
+interface CachedState extends GlobalState {
+  timestamp: number;
 }
 
 const stateCache = new Map<string, CachedState>();
 
-function extractBearerToken(event: APIGatewayProxyEventV2): string | null {
-  const auth = event.headers?.authorization || event.headers?.Authorization || '';
-  const parts = auth.split(' ');
-  if (parts.length === 2 && parts[0].toLowerCase() === 'bearer') {
-    return parts[1];
-  }
-  return null;
-}
-
-async function queryDensity(eventId: string): Promise<DensityBucket[]> {
-  // Density map is sharded across 10 sub-partitions to spread write load.
-  // Read all 10 shards in parallel and merge.
+async function queryDensity(eventId: string): Promise<Array<{ bucketTs: number; count: number }>> {
   const densityPks = Array.from({ length: 10 }, (_, i) => `EVENT#${eventId}#DENSITY#SHARD#${i}`);
 
   const results = await Promise.all(densityPks.map(pk =>
@@ -103,56 +84,6 @@ async function loadState(eventId: string): Promise<CachedState> {
   return state;
 }
 
-function calculateQueuePosition(
-  densityBuckets: DensityBucket[],
-  entryTimestamp: number
-): number {
-  let position = 0;
-  const entrySec = Math.floor(entryTimestamp / 1000);
-  for (const bucket of densityBuckets) {
-    if (bucket.bucketTs < entrySec) {
-      position += bucket.count;
-    } else {
-      break;
-    }
-  }
-  return position;
-}
-
-function estimateWaitSeconds(
-  queuePosition: number,
-  activePurchaserCount: number
-): number | null {
-  if (queuePosition <= 0) return 0;
-  const completionRatePerSec = Math.max(activePurchaserCount * COMPLETION_RATE_FACTOR, 1);
-  return Math.ceil(queuePosition / completionRatePerSec);
-}
-
-function hashCodeFanId(fanId: string): number {
-  let hash = 0;
-  for (let i = 0; i < fanId.length; i++) {
-    const char = fanId.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-
-function isAdmitted(
-  entryTimestamp: number,
-  admittedUntilTimestamp: number,
-  fanId: string,
-  tieBreakerThreshold: number
-): boolean {
-  const entrySec = Math.floor(entryTimestamp / 1000);
-  const admittedSec = Math.floor(admittedUntilTimestamp / 1000);
-  if (entrySec < admittedSec) return true;
-  if (entrySec === admittedSec) {
-    return hashCodeFanId(fanId) % 100 < tieBreakerThreshold;
-  }
-  return false;
-}
-
 function extractEventId(path: string): string | null {
   const parts = path.split('/');
   const idx = parts.indexOf('event');
@@ -169,60 +100,20 @@ export async function handler(
   const baseHeaders = { 'content-type': 'application/json', 'x-request-id': requestId };
 
   try {
-    const token = extractBearerToken(event);
-    if (!token) {
-      return {
-        statusCode: 401,
-        headers: baseHeaders,
-        body: JSON.stringify({ error: 'Missing or invalid Authorization header' }),
-      };
-    }
-
-    const jwtPayload: JwtPayload = await verifyJwt(token, SIGNING_SECRET_ID);
     const eventId = extractEventId(event.rawPath) || EVENT_ID;
-
     const state = await loadState(eventId);
-    const admitted = isAdmitted(jwtPayload.entryTimestamp, state.admittedUntilTimestamp, jwtPayload.fanId, state.tieBreakerThreshold);
-
-    if (admitted) {
-      return {
-        statusCode: 200,
-        headers: baseHeaders,
-        body: JSON.stringify({
-          admitted: true,
-          fanId: jwtPayload.fanId,
-          entryTimestamp: jwtPayload.entryTimestamp,
-          admittedUntilTimestamp: state.admittedUntilTimestamp,
-          activePurchaserCount: state.activePurchaserCount,
-        }),
-      };
-    }
-
-    const queuePosition = calculateQueuePosition(state.densityBuckets, jwtPayload.entryTimestamp);
-    const estimatedWaitSeconds = estimateWaitSeconds(queuePosition, state.activePurchaserCount);
 
     return {
       statusCode: 200,
       headers: baseHeaders,
       body: JSON.stringify({
-        admitted: false,
-        fanId: jwtPayload.fanId,
-        entryTimestamp: jwtPayload.entryTimestamp,
         admittedUntilTimestamp: state.admittedUntilTimestamp,
-        queuePosition,
-        estimatedWaitSeconds,
+        tieBreakerThreshold: state.tieBreakerThreshold,
         activePurchaserCount: state.activePurchaserCount,
+        densityBuckets: state.densityBuckets,
       }),
     };
   } catch (error: any) {
-    if (error.code === 'ERR_JWT_EXPIRED' || error.code === 'ERR_JWS_INVALID') {
-      return {
-        statusCode: 401,
-        headers: baseHeaders,
-        body: JSON.stringify({ error: 'Invalid or expired token' }),
-      };
-    }
-
     console.error('Status error:', error);
     return {
       statusCode: 500,

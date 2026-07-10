@@ -131,8 +131,6 @@ export class InfraStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(10),
       environment: {
         TABLE_NAME: table.tableName,
-        SIGNING_SECRET_ID: signingSecret.secretName,
-        COMPLETION_RATE_FACTOR: '0.01',
       },
       bundling: {
         target: 'es2022',
@@ -298,12 +296,12 @@ export class InfraStack extends cdk.Stack {
 
     const cachePolicy = new cloudfront.CachePolicy(this, 'StatusCachePolicy', {
       cachePolicyName: 'StatusPolicy',
-      comment: 'Short TTL for status polling, per-user via Authorization header',
+      comment: 'Global state cached for 2s. No per-user cache key — status is public.',
       defaultTtl: cdk.Duration.seconds(2),
       maxTtl: cdk.Duration.seconds(5),
       minTtl: cdk.Duration.seconds(0),
       cookieBehavior: cloudfront.CacheCookieBehavior.none(),
-      headerBehavior: cloudfront.CacheHeaderBehavior.allowList('Authorization'),
+      headerBehavior: cloudfront.CacheHeaderBehavior.none(),
       queryStringBehavior: cloudfront.CacheQueryStringBehavior.all(),
       enableAcceptEncodingGzip: true,
     });

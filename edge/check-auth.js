@@ -3,8 +3,8 @@ function handler(event) {
   var headers = request.headers;
   var uri = request.uri;
 
-  // Allow join requests without authentication
-  if (uri.indexOf('/join') !== -1) {
+  // Allow join and status requests without authentication
+  if (uri.indexOf('/join') !== -1 || uri.indexOf('/status') !== -1) {
     return request;
   }
 
