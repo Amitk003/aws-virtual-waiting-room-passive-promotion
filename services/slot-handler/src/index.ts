@@ -196,23 +196,6 @@ export async function handler(
           ConditionExpression: 'attribute_exists(PK)',
         }));
 
-        // Decrement counter only if it is positive.
-        // Prevents the counter from going negative due to:
-        // - TTL expiry race (TTL fires between DeleteItem and this Update)
-        // - Stale /release from before an invalidation
-        const decrementResult = await ddb.send(new UpdateItemCommand({
-          TableName: TABLE_NAME,
-          Key: {
-            PK: { S: `EVENT#${eventId}#METADATA` },
-            SK: { S: 'METADATA' },
-          },
-          UpdateExpression: 'ADD ActivePurchaserCount :negOne',
-          ConditionExpression: 'ActivePurchaserCount > :zero',
-          ExpressionAttributeValues: {
-            ':negOne': { N: '-1' },
-            ':zero': { N: '0' },
-          },
-        }));
         console.log(JSON.stringify({ event: 'slot_released', requestId, eventId, fanId }));
       } catch (err: any) {
         if (err.name === 'ConditionalCheckFailedException') {

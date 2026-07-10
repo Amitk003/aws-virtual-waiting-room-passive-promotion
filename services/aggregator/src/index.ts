@@ -22,7 +22,6 @@ function extractEventId(pk: string): string | null {
 
 export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent) => {
   const densityByBucket = new Map<string, number>();
-  const ttlCounters = new Map<string, number>();
   let sequenceInput = '';
 
   for (const record of event.Records) {
@@ -43,25 +42,9 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
         densityByBucket.set(key, (densityByBucket.get(key) || 0) + 1);
       }
     }
-
-    if (
-      record.eventName === 'REMOVE' &&
-      record.dynamodb?.OldImage &&
-      record.userIdentity?.type === 'Service' &&
-      record.userIdentity?.principalId === 'dynamodb.amazonaws.com'
-    ) {
-      const pk = record.dynamodb.OldImage.PK?.S || '';
-
-      if (pk.includes('#SESSION#')) {
-        const eventId = extractEventId(pk);
-        if (!eventId) continue;
-
-        ttlCounters.set(eventId, (ttlCounters.get(eventId) || 0) + 1);
-      }
-    }
   }
 
-  if (densityByBucket.size === 0 && ttlCounters.size === 0) return;
+  if (densityByBucket.size === 0) return;
 
   // Compute idempotent batch fingerprint from all sequence numbers
   const batchId = createHash('sha256').update(sequenceInput).digest('hex').slice(0, 16);
@@ -104,20 +87,6 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
         UpdateExpression: 'ADD #count :inc',
         ExpressionAttributeNames: { '#count': 'Count' },
         ExpressionAttributeValues: { ':inc': { N: String(count) } },
-      },
-    });
-  }
-
-  for (const [eventId, count] of ttlCounters) {
-    transactItems.push({
-      Update: {
-        TableName: TABLE_NAME,
-        Key: {
-          PK: { S: `EVENT#${eventId}#METADATA` },
-          SK: { S: 'METADATA' },
-        },
-        UpdateExpression: 'ADD ActivePurchaserCount :dec',
-        ExpressionAttributeValues: { ':dec': { N: String(-count) } },
       },
     });
   }
