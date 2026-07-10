@@ -13,9 +13,9 @@ This document lists all database operations the system needs. Each pattern was t
 
 ## Pattern 2: Read Aggregator Stream
 
-- **Operation**: DynamoDB Stream read
-- **Target**: DDB Stream
-- **Purpose**: Captures new QueueTicket INSERT and SessionItem REMOVE events. Used for building the time-density map and decrementing the session counter on TTL expiry.
+- **Operation**: DynamoDB Stream read (Lambda event source mapping)
+- **Target**: DDB Stream (NEW_AND_OLD_IMAGES)
+- **Purpose**: Deliver QueueTicket INSERT events (per-second density aggregation) and SessionItem REMOVE events (TTL session counter decrement) to the Aggregator Lambda.
 
 ## Pattern 3: Get Global State
 
@@ -23,7 +23,7 @@ This document lists all database operations the system needs. Each pattern was t
 - **Target**: Table
 - **PK**: `EVENT#<EventId>#METADATA`
 - **SK**: `METADATA`
-- **Purpose**: Reads the current admission watermark, active session count, and time-density map. This data is cached at the edge (CloudFront) to handle millions of user polling requests.
+- **Purpose**: Reads the current admission watermark and active session count. Density data is fetched separately (Pattern 10). Cached at the edge (CloudFront).
 
 ## Pattern 4: Move Watermark Forward
 
@@ -74,6 +74,21 @@ This document lists all database operations the system needs. Each pattern was t
 - **Step 2**: UpdateItem on GlobalState to set `ActivePurchaserCount` to the actual count
 - **Purpose**: Corrects any counter drift from missed TTL events or duplicate stream processing.
 
+## Pattern 10: Get Time Density Map
+
+- **Operation**: Query
+- **Target**: Table
+- **PK**: `EVENT#<EventId>#DENSITY`
+- **SK**: begins_with `BUCKET#`
+- **Purpose**: Returns all DensityBucket items for an event. Each item has a `Count` attribute representing the number of users who joined in that 1-second bucket. The total queue position for a user at timestamp T is the sum of all Count values for buckets before T. With at most 3600 items for a typical 1-hour event, this is fast enough to serve at the edge.
+
+- **Operation**: Query GSI + UpdateItem
+- **Target**: GSI + Table
+- **Frequency**: Every 5 minutes
+- **Step 1**: Query `SessionMetadataIndex` at `GSIPK = EVENT#<Id>#SESSION_META`, count results
+- **Step 2**: UpdateItem on GlobalState to set `ActivePurchaserCount` to the actual count
+- **Purpose**: Corrects any counter drift from missed TTL events or duplicate stream processing.
+
 ## Access Pattern Summary
 
 | # | Pattern | Operation | Frequency |
@@ -87,3 +102,4 @@ This document lists all database operations the system needs. Each pattern was t
 | 7 | Release slot (manual) | DeleteItem + UpdateItem | 1000/sec (peak) |
 | 8 | TTL auto-release | Stream trigger | On TTL expiry |
 | 9 | Counter drift correction | Query GSI + UpdateItem | 1/5min |
+| 10 | Get time density map | Query table (DensityBucket) | On demand (cached) |
