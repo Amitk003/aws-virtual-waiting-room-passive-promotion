@@ -10,20 +10,15 @@ async function correctCounter(eventId: string): Promise<void> {
   const result = await ddb.send(new QueryCommand({
     TableName: TABLE_NAME,
     IndexName: 'SessionMetadataIndex',
-    KeyConditionExpression: 'GSIPK = :gsiPk',
+    KeyConditionExpression: 'GSIPK = :gsiPk AND ExpiresAt > :now',
     ExpressionAttributeValues: {
       ':gsiPk': { S: `EVENT#${eventId}#SESSION_META` },
+      ':now': { N: String(nowSeconds) },
     },
-    ProjectionExpression: 'ExpiresAt',
+    Select: 'COUNT',
   }));
 
-  let validCount = 0;
-  for (const item of result.Items || []) {
-    const expiresAt = Number(item.ExpiresAt?.N || 0);
-    if (expiresAt > nowSeconds) {
-      validCount++;
-    }
-  }
+  const validCount = result.Count ?? 0;
 
   await ddb.send(new UpdateItemCommand({
     TableName: TABLE_NAME,

@@ -75,45 +75,23 @@ export async function handler(): Promise<void> {
 
     const admittedUntilTimestamp = Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0);
 
-    // Query GSI to count valid (non-expired) sessions
-    // Expired sessions are not deleted here — they are left for DynamoDB TTL
-    // to remove asynchronously. TTL-driven REMOVE events are handled by the
-    // Stream Aggregator which conditionally decrements the counter.
-    // By counting only valid sessions and SET-ing the counter, we avoid the
-    // double-decrement race that would occur if we both deleted items here
-    // and relied on the stream aggregator.
+    // Query GSI for active (non-expired) sessions only.
+    // Since ExpiresAt is now the GSI sort key, the condition
+    // ExpiresAt > :now filters out expired sessions at the DB level.
+    // With max 1000 active sessions, the query never needs pagination.
+    const nowSeconds = Math.floor(Date.now() / 1000);
     const sessionQuery = await ddb.send(new QueryCommand({
       TableName: TABLE_NAME,
       IndexName: 'SessionMetadataIndex',
-      KeyConditionExpression: 'GSIPK = :gsiPk',
+      KeyConditionExpression: 'GSIPK = :gsiPk AND ExpiresAt > :now',
       ExpressionAttributeValues: {
         ':gsiPk': { S: `EVENT#${EVENT_ID}#SESSION_META` },
+        ':now': { N: String(nowSeconds) },
       },
-      ProjectionExpression: 'ExpiresAt',
+      Select: 'COUNT',
     }));
 
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    let validSessionCount = 0;
-    for (const item of sessionQuery.Items || []) {
-      const expiresAt = Number(item.ExpiresAt?.N || 0);
-      if (expiresAt > nowSeconds) {
-        validSessionCount++;
-      }
-    }
-
-    // Sync counter to the real count every iteration
-    await ddb.send(new UpdateItemCommand({
-      TableName: TABLE_NAME,
-      Key: {
-        PK: { S: `EVENT#${EVENT_ID}#METADATA` },
-        SK: { S: 'METADATA' },
-      },
-      UpdateExpression: 'SET ActivePurchaserCount = :count',
-      ExpressionAttributeValues: {
-        ':count': { N: String(validSessionCount) },
-      },
-    }));
-
+    const validSessionCount = sessionQuery.Count ?? 0;
     const freeSlots = MAX_SLOTS - validSessionCount;
     if (freeSlots <= 0) {
       await sleep(1000);
