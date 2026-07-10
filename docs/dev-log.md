@@ -419,3 +419,29 @@ CDK additions:
 Scripts:
 - prewarm-table.js: Switches table to PROVISIONED with target WCU/RCU before event, back to PAY_PER_REQUEST after
 - rotate-key.js: Generates new ECC P-256 key pair, stores with new kid version in Secrets Manager
+
+---
+
+### 2026-07-10 - Zero-downtime key rotation for verifiers
+
+Files changed:
+- `services/status-api/src/jwt.ts` — `getPublicKey()` now accepts optional `targetKid`; if the token's kid differs from `cachedKid`, re-fetches from Secrets Manager. `verifyJwt()` calls `decodeProtectedHeader(token)` to extract kid before verification.
+- `services/slot-handler/src/jwt.ts` — Same changes.
+
+This ensures warm verifier containers immediately pick up a rotated public key without waiting for a cold start.
+
+---
+
+### 2026-07-10 - Integration test, CloudFront Function, load test, CI/CD, docs cleanup
+
+Files created:
+- `scripts/test-e2e.js` — End-to-end integration test (join, poll, promote, claim, release)
+- `edge/check-auth.js` — CloudFront Function that rejects requests without Bearer token on protected paths
+- `scripts/load-test.js` — k6 load test script for status endpoint
+- `.github/workflows/deploy.yml` — GitHub Actions CI/CD pipeline (typecheck + build + cdk deploy)
+
+Files changed:
+- `infra/lib/infra-stack.ts` — Added `cloudfront.Function` (TokenCheck) associated with both default and status behaviors
+- `README.md` — Removed KMS, updated tech stack, project structure, phases, setup instructions
+- `infra/README.md` — Removed auto-generated CDK template file
+- `docs/dev-log.md` — This entry
