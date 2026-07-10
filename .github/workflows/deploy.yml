@@ -1,0 +1,88 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install & Build - Ingestion
+        working-directory: services/ingestion
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install & Build - Aggregator
+        working-directory: services/aggregator
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install & Build - Status API
+        working-directory: services/status-api
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install & Build - Slot Handler
+        working-directory: services/slot-handler
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install & Build - Reconciliation
+        working-directory: services/reconciliation
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install & Build - Promotion
+        working-directory: services/promotion
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install & TypeCheck - CDK
+        working-directory: infra
+        run: |
+          npm ci
+          npm run build
+
+      - name: CDK Diff
+        working-directory: infra
+        run: npx cdk diff
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION || 'us-east-1' }}
+
+  deploy:
+    needs: validate
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Deploy CDK Stack
+        working-directory: infra
+        run: |
+          npm ci
+          npx cdk deploy --require-approval never
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION || 'us-east-1' }}
