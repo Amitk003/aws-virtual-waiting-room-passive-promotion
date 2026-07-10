@@ -60,9 +60,9 @@ POST /api/v1/event/{eventId}/join
 
 **Shard distribution**: The QueueTicket partition key uses a random shard suffix (`SHARD#<1-2000>`). This spreads 1M writes/second evenly across DynamoDB partitions (500 writes/sec per partition, well below the 1000 WCU limit).
 
-**JWT signing (local, no KMS API call)**: The ECC P-256 private key is stored in AWS Secrets Manager. The Lambda fetches the key once at cold start and caches it in memory. All subsequent invocations sign JWTs locally using the `jose` library. This avoids KMS API throttling at 1M requests/sec. KMS is only used for `GetPublicKey` (retrieving the public key for edge authorizers).
+**JWT signing (local, no KMS API call)**: The ECC P-256 key pair is stored in AWS Secrets Manager (both private and public key). The Lambda fetches the key once at cold start and caches it in memory. All subsequent invocations sign JWTs locally using the `jose` library. This avoids KMS API calls entirely in the hot path. KMS is not used at all.
 
-**JWT format**: ES256 algorithm (ECDSA P-256). The `kid` header contains the KMS key ID so edge verifiers can fetch the matching public key.
+**JWT format**: ES256 algorithm (ECDSA P-256). The `kid` header is `vwr-v1` (a fixed string). The verifier loads the public key from the same Secrets Manager secret, ensuring the key pair is always matched.
 
 **Provisioned Concurrency**: Uncomment the alias block in the CDK stack before the event to pre-warm Lambda containers and eliminate cold starts.
 
@@ -74,7 +74,7 @@ After first `cdk deploy`, you need to populate the signing key:
 node scripts/generate-key.js <SigningSecretName>
 ```
 
-This generates an ECC P-256 key pair and stores the private key in Secrets Manager.
+This generates an ECC P-256 key pair and stores both the private and public key in Secrets Manager.
 
 ## Local development
 
@@ -90,7 +90,7 @@ npm test
 services/ingestion/
   src/
     index.ts    - Lambda handler
-    jwt.ts      - JWT signing (local jose library, no KMS in hot path)
+    jwt.ts      - JWT signing (local jose library, no KMS)
     shard.ts    - Shard calculation
   test/
     ingestion.test.ts

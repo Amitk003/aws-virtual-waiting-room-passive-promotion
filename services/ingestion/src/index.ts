@@ -7,7 +7,6 @@ const ddb = new DynamoDBClient();
 
 const TABLE_NAME = process.env.TABLE_NAME!;
 const SIGNING_SECRET_ID = process.env.SIGNING_SECRET_ID!;
-const KMS_KEY_ID = process.env.KMS_KEY_ID!;
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const JWT_EXPIRY_SECONDS = 3600; // 1 hour
 
@@ -33,9 +32,8 @@ export async function handler(
     const expirySeconds = nowSeconds + JWT_EXPIRY_SECONDS;
 
     // Write tracking item to prevent double-join
-    // PK contains FanId so each user has exactly one tracking item
     // If Lambda crashes between this write and the QueueTicket write,
-    // TTL auto-cleans the orphaned tracking item within 1 hour
+    // TTL auto-cleans the orphaned tracking item
     const trackingPk = `EVENT#${eventId}#FAN#${fanId}`;
 
     await ddb.send(new PutItemCommand({
@@ -68,7 +66,7 @@ export async function handler(
       },
     }));
 
-    // Sign JWT locally using cached ECC key (no KMS call in hot path)
+    // Sign JWT locally using cached ECC key
     const jwtPayload: JwtPayload = {
       fanId,
       entryTimestamp,
@@ -77,7 +75,7 @@ export async function handler(
       exp: expirySeconds,
     };
 
-    const token = await signJwt(jwtPayload, SIGNING_SECRET_ID, KMS_KEY_ID);
+    const token = await signJwt(jwtPayload, SIGNING_SECRET_ID);
 
     return {
       statusCode: 200,

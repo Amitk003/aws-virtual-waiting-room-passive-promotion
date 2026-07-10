@@ -183,14 +183,14 @@ Stack additions:
 - IAM: Auto-created role with DynamoDB write + KMS sign permissions
 - CORS: Enabled for content-type and authorization headers
 - Provisioned Concurrency: Placeholder (commented out, to be enabled before event)
-
 Notes:
+
 - Lambda uses KMS Sign API directly (for production at 1M scale, switch to local key caching from Secrets Manager)
 - Table name and key ID passed via environment variables
 - projectRoot set to repo root for cross-directory Lambda bundling
 - API Gateway uses HTTP API (v2) for lower latency and cost
 
-### 2026-07-10 - Bug fix: DER signature format, KMS hot path, double-join check
+### 2026-07-10 - Bug fixes: DER signature, KMS hot path, double-join check
 
 Commands ran:
 - `npm install` (in services/ingestion/) - Added jose and @aws-sdk/client-secrets-manager
@@ -211,3 +211,25 @@ Bug fixes applied:
 2. KMS hot path: Removed `kms:Sign` from Lambda. JWTs are now signed locally using a cached ECC P-256 private key loaded from Secrets Manager. KMS is only used for `kms:GetPublicKey` (authorizer needs the public key). This eliminates KMS API throttling at 1M requests/sec.
 
 3. Double-join check: Added tracking item write with PK = `EVENT#<eventId>#FAN#<fanId>` and condition `attribute_not_exists(PK)`. If the condition fails, returns 409. The tracking item has ExpiresAt TTL so orphaned items auto-clean if Lambda crashes between the two writes.
+
+### 2026-07-10 - Removed KMS entirely (unrelated key pair bug)
+
+Commands ran:
+- Removed `@aws-sdk/client-kms` from services/ingestion/package.json
+- `npx cdk synth` - Verified CloudFormation output
+
+Files changed:
+- `infra/lib/infra-stack.ts` - Removed KMS key, alias, grants, env var; removed KmsKeyId output
+- `services/ingestion/src/jwt.ts` - Removed KMS client, GetPublicKeyCommand; kid is now fixed string `vwr-v1`
+- `services/ingestion/src/index.ts` - Removed KMS_KEY_ID env var
+- `services/ingestion/package.json` - Removed @aws-sdk/client-kms
+- `scripts/generate-key.js` - Already stored both privateKey and publicKey (no change needed)
+- `docs/iac-setup.md` - Replaced KMS doc with Secrets Manager doc
+- `docs/ingestion-service.md` - Updated JWT signing section
+- `docs/dev-log.md` - This entry
+
+Reason:
+- There were two unrelated ECC P-256 key pairs: KMS key (for GetPublicKey) and Secrets Manager key (for local signing)
+- The `kid` header derived from the KMS key ID required verifiers to reference KMS, but the actual signing key was the Secrets Manager one
+- Removing KMS entirely means one key pair stored in Secrets Manager, used for both signing (private key) and verification (public key)
+- Eliminates the risk of key mismatch and removes a dependency that was only used for deriving a key ID

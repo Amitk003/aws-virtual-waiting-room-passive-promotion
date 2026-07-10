@@ -7,7 +7,7 @@ This folder contains the AWS CDK v2 (TypeScript) project that defines all cloud 
 | Resource | Type | Purpose |
 |----------|------|---------|
 | DynamoDB Table | `AWS::DynamoDB::Table` | Main data store (single-table design) |
-| KMS Key | `AWS::KMS::Key` | Asymmetric ECC P-256 key for JWT signing |
+| Secrets Manager Secret | `AWS::SecretsManager::Secret` | ECC P-256 key pair for JWT signing |
 
 ## Stack resources
 
@@ -21,16 +21,16 @@ This folder contains the AWS CDK v2 (TypeScript) project that defines all cloud 
 - TTL: ExpiresAt attribute
 - GSI: SessionMetadataIndex (GSIPK, KEYS_ONLY)
 
-### KMS Key: JwtSigningKey
+### Secrets Manager Secret: JwtSigningSecret
 
-- Type: Asymmetric (ECC_NIST_P256)
-- Usage: SIGN_VERIFY
-- Alias: alias/virtual-waiting-room-jwt-signing-{stackName} (dynamic suffix)
+- Stores a JSON object with `privateKey` (PKCS#8 PEM) and `publicKey` (SPKI PEM)
+- Both keys are generated together so they are guaranteed to match
+- Run `scripts/generate-key.js` after the first deploy to populate it
 - Removal policy: DESTROY (safe for dev, change to RETAIN for production)
 
 ### IAM Roles
 
-IAM roles are NOT defined in this stack. Lambda functions in later phases will create their own execution roles automatically via CDK's `lambda.Function`. Permissions are granted inline with calls like `table.grantWriteData(fn)` and `signingKey.grantSign(fn)`. This removes boilerplate and follows CDK best practices.
+IAM roles are NOT defined in this stack. Lambda functions in later phases will create their own execution roles automatically via CDK's `lambda.Function`. Permissions are granted inline with calls like `table.grantWriteData(fn)` and `signingSecret.grantRead(fn)`. This removes boilerplate and follows CDK best practices.
 
 ## Useful commands
 
@@ -56,5 +56,5 @@ This keeps the base template deployable without account limit issues.
 
 ## Production considerations
 
-- KMS removal policy: Change to RETAIN for production so the signing key is not destroyed on stack deletion
+- Secrets Manager secret removal policy: Change to RETAIN for production so the signing key is not destroyed on stack deletion
 - Table name: A hardcoded table name can be added if needed, but auto-generated names prevent conflicts across environments
