@@ -10,9 +10,16 @@ const SIGNING_SECRET_ID = process.env.SIGNING_SECRET_ID!;
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const JWT_EXPIRY_SECONDS = 3600; // 1 hour
 
+function validateFanId(fanId: string): boolean {
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(fanId);
+}
+
 export async function handler(
   event: APIGatewayProxyEventV2
 ): Promise<APIGatewayProxyResultV2> {
+  const requestId = event.requestContext?.requestId || 'unknown';
+  const baseHeaders = { 'content-type': 'application/json', 'x-request-id': requestId };
+
   try {
     const eventId = event.pathParameters?.eventId || EVENT_ID;
     const body = JSON.parse(event.body || '{}');
@@ -21,12 +28,20 @@ export async function handler(
     if (!fanId) {
       return {
         statusCode: 400,
-        headers: { 'content-type': 'application/json' },
+        headers: baseHeaders,
         body: JSON.stringify({ error: 'fanId is required' }),
       };
     }
 
-    // Get precise timestamp (Lambda system clock is synced via AWS Time Sync Service)
+    if (!validateFanId(fanId)) {
+      return {
+        statusCode: 400,
+        headers: baseHeaders,
+        body: JSON.stringify({ error: 'Invalid fanId format' }),
+      };
+    }
+
+    // Get precise timestamp via system clock
     const entryTimestamp = Date.now();
     const nowSeconds = Math.floor(entryTimestamp / 1000);
     const expirySeconds = nowSeconds + JWT_EXPIRY_SECONDS;
@@ -75,7 +90,7 @@ export async function handler(
         if (reasons[0]?.Code === 'ConditionalCheckFailed') {
           return {
             statusCode: 409,
-            headers: { 'content-type': 'application/json' },
+            headers: baseHeaders,
             body: JSON.stringify({ error: 'User already in queue' }),
           };
         }
@@ -96,7 +111,7 @@ export async function handler(
 
     return {
       statusCode: 200,
-      headers: { 'content-type': 'application/json' },
+      headers: baseHeaders,
       body: JSON.stringify({
         token,
         entryTimestamp,
@@ -109,7 +124,7 @@ export async function handler(
 
     return {
       statusCode: 500,
-      headers: { 'content-type': 'application/json' },
+      headers: baseHeaders,
       body: JSON.stringify({ error: 'Internal server error' }),
     };
   }

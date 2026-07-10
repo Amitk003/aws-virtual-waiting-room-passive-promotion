@@ -133,8 +133,10 @@ function isAdmitted(
   fanId: string,
   tieBreakerThreshold: number
 ): boolean {
-  if (entryTimestamp < admittedUntilTimestamp) return true;
-  if (entryTimestamp === admittedUntilTimestamp) {
+  const entrySec = Math.floor(entryTimestamp / 1000);
+  const admittedSec = Math.floor(admittedUntilTimestamp / 1000);
+  if (entrySec < admittedSec) return true;
+  if (entrySec === admittedSec) {
     return hashCodeFanId(fanId) % 100 < tieBreakerThreshold;
   }
   return false;
@@ -152,12 +154,15 @@ function extractEventId(path: string): string | null {
 export async function handler(
   event: APIGatewayProxyEventV2
 ): Promise<APIGatewayProxyResultV2> {
+  const requestId = event.requestContext?.requestId || 'unknown';
+  const baseHeaders = { 'content-type': 'application/json', 'x-request-id': requestId };
+
   try {
     const token = extractBearerToken(event);
     if (!token) {
       return {
         statusCode: 401,
-        headers: { 'content-type': 'application/json' },
+        headers: baseHeaders,
         body: JSON.stringify({ error: 'Missing or invalid Authorization header' }),
       };
     }
@@ -171,7 +176,7 @@ export async function handler(
     if (admitted) {
       return {
         statusCode: 200,
-        headers: { 'content-type': 'application/json' },
+        headers: baseHeaders,
         body: JSON.stringify({
           admitted: true,
           fanId: jwtPayload.fanId,
@@ -187,7 +192,7 @@ export async function handler(
 
     return {
       statusCode: 200,
-      headers: { 'content-type': 'application/json' },
+      headers: baseHeaders,
       body: JSON.stringify({
         admitted: false,
         fanId: jwtPayload.fanId,
@@ -202,7 +207,7 @@ export async function handler(
     if (error.code === 'ERR_JWT_EXPIRED' || error.code === 'ERR_JWS_INVALID') {
       return {
         statusCode: 401,
-        headers: { 'content-type': 'application/json' },
+        headers: baseHeaders,
         body: JSON.stringify({ error: 'Invalid or expired token' }),
       };
     }
@@ -210,7 +215,7 @@ export async function handler(
     console.error('Status error:', error);
     return {
       statusCode: 500,
-      headers: { 'content-type': 'application/json' },
+      headers: baseHeaders,
       body: JSON.stringify({ error: 'Internal server error' }),
     };
   }

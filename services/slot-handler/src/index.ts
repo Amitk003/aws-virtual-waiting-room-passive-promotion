@@ -42,22 +42,31 @@ function isAdmitted(
   fanId: string,
   tieBreakerThreshold: number
 ): boolean {
-  if (entryTimestamp < admittedUntilTimestamp) return true;
-  if (entryTimestamp === admittedUntilTimestamp) {
+  const entrySec = Math.floor(entryTimestamp / 1000);
+  const admittedSec = Math.floor(admittedUntilTimestamp / 1000);
+  if (entrySec < admittedSec) return true;
+  if (entrySec === admittedSec) {
     return hashCodeFanId(fanId) % 100 < tieBreakerThreshold;
   }
   return false;
 }
 
+function validateFanId(fanId: string): boolean {
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(fanId);
+}
+
 export async function handler(
   event: APIGatewayProxyEventV2
 ): Promise<APIGatewayProxyResultV2> {
+  const requestId = event.requestContext?.requestId || 'unknown';
+  const baseHeaders = { 'content-type': 'application/json', 'x-request-id': requestId };
+
   try {
     const token = extractBearerToken(event);
     if (!token) {
       return {
         statusCode: 401,
-        headers: { 'content-type': 'application/json' },
+        headers: baseHeaders,
         body: JSON.stringify({ error: 'Missing or invalid Authorization header' }),
       };
     }
@@ -65,6 +74,14 @@ export async function handler(
     const jwtPayload = await verifyJwt(token, SIGNING_SECRET_ID);
     const eventId = extractEventId(event.rawPath) || EVENT_ID;
     const fanId = jwtPayload.fanId;
+
+    if (!validateFanId(fanId)) {
+      return {
+        statusCode: 400,
+        headers: baseHeaders,
+        body: JSON.stringify({ error: 'Invalid fanId in token' }),
+      };
+    }
     const sessionPk = `EVENT#${eventId}#SESSION#${fanId}`;
     const nowSeconds = Math.floor(Date.now() / 1000);
     const expirySeconds = nowSeconds + SESSION_TTL_SECONDS;
@@ -88,7 +105,7 @@ export async function handler(
       if (!isAdmitted(jwtPayload.entryTimestamp, admittedUntilTimestamp, fanId, tieBreakerThreshold)) {
         return {
           statusCode: 403,
-          headers: { 'content-type': 'application/json' },
+          headers: baseHeaders,
           body: JSON.stringify({ error: 'You are not eligible to enter checkout yet.' }),
         };
       }
@@ -136,7 +153,7 @@ export async function handler(
           if (reasons[1]?.Code === 'ConditionalCheckFailed') {
             return {
               statusCode: 429,
-              headers: { 'content-type': 'application/json' },
+              headers: baseHeaders,
               body: JSON.stringify({ error: 'All checkout slots are full. Try again shortly.' }),
             };
           }
@@ -144,7 +161,7 @@ export async function handler(
           if (reasons[0]?.Code === 'ConditionalCheckFailed') {
             return {
               statusCode: 409,
-              headers: { 'content-type': 'application/json' },
+              headers: baseHeaders,
               body: JSON.stringify({ error: 'Session already exists' }),
             };
           }
@@ -154,7 +171,7 @@ export async function handler(
 
       return {
         statusCode: 200,
-        headers: { 'content-type': 'application/json' },
+        headers: baseHeaders,
         body: JSON.stringify({
           sessionStarted: true,
           fanId,
@@ -179,24 +196,30 @@ export async function handler(
           ConditionExpression: 'attribute_exists(PK)',
         }));
 
-        // Only decrement if the item was actually deleted
-        await ddb.send(new UpdateItemCommand({
+        // Decrement counter only if it is positive.
+        // Prevents the counter from going negative due to:
+        // - TTL expiry race (TTL fires between DeleteItem and this Update)
+        // - Stale /release from before an invalidation
+        const decrementResult = await ddb.send(new UpdateItemCommand({
           TableName: TABLE_NAME,
           Key: {
             PK: { S: `EVENT#${eventId}#METADATA` },
             SK: { S: 'METADATA' },
           },
           UpdateExpression: 'ADD ActivePurchaserCount :negOne',
+          ConditionExpression: 'ActivePurchaserCount > :zero',
           ExpressionAttributeValues: {
             ':negOne': { N: '-1' },
+            ':zero': { N: '0' },
           },
         }));
+        console.log(`Released slot for event=${eventId} fan=${fanId} requestId=${requestId}`);
       } catch (err: any) {
         if (err.name === 'ConditionalCheckFailedException') {
           // Session already deleted (completed, released, or TTL-expired)
           return {
             statusCode: 200,
-            headers: { 'content-type': 'application/json' },
+            headers: baseHeaders,
             body: JSON.stringify({ sessionReleased: true, fanId }),
           };
         }
@@ -205,21 +228,21 @@ export async function handler(
 
       return {
         statusCode: 200,
-        headers: { 'content-type': 'application/json' },
+        headers: baseHeaders,
         body: JSON.stringify({ sessionReleased: true, fanId }),
       };
     }
 
     return {
       statusCode: 405,
-      headers: { 'content-type': 'application/json' },
+      headers: baseHeaders,
       body: JSON.stringify({ error: 'Method not allowed' }),
     };
   } catch (error: any) {
     if (error.code === 'ERR_JWT_EXPIRED' || error.code === 'ERR_JWS_INVALID') {
       return {
         statusCode: 401,
-        headers: { 'content-type': 'application/json' },
+        headers: baseHeaders,
         body: JSON.stringify({ error: 'Invalid or expired token' }),
       };
     }
@@ -227,7 +250,7 @@ export async function handler(
     if (error.name === 'ConditionalCheckFailedException') {
       return {
         statusCode: 409,
-        headers: { 'content-type': 'application/json' },
+        headers: baseHeaders,
         body: JSON.stringify({ error: 'Session already exists' }),
       };
     }
@@ -235,7 +258,7 @@ export async function handler(
     console.error('Slot handler error:', error);
     return {
       statusCode: 500,
-      headers: { 'content-type': 'application/json' },
+      headers: baseHeaders,
       body: JSON.stringify({ error: 'Internal server error' }),
     };
   }
