@@ -1,4 +1,4 @@
-import { DynamoDBClient, TransactWriteItemsCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, TransactWriteItemsCommand, GetItemCommand } from '@aws-sdk/client-dynamodb';
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { getShardId } from './shard.js';
 import { signJwt, JwtPayload } from './jwt.js';
@@ -42,6 +42,50 @@ export async function handler(
       };
     }
 
+    // If this is a rejoin request, look up existing QueueTicket and re-sign JWT
+    if (event.rawPath?.includes('/rejoin')) {
+      const trackingResult = await ddb.send(new GetItemCommand({
+        TableName: TABLE_NAME,
+        Key: {
+          PK: { S: `EVENT#${eventId}#FAN#${fanId}` },
+          SK: { S: 'PENDING' },
+        },
+        ProjectionExpression: 'EntryTimestamp, ShardId',
+      }));
+
+      const storedEntryTimestamp = trackingResult.Item?.EntryTimestamp?.N;
+      const storedShardId = trackingResult.Item?.ShardId?.N;
+
+      if (!storedEntryTimestamp || !storedShardId) {
+        return {
+          statusCode: 404,
+          headers: baseHeaders,
+          body: JSON.stringify({ error: 'No existing queue entry found. Use /join instead.' }),
+        };
+      }
+
+      const newJwtPayload: JwtPayload = {
+        fanId,
+        entryTimestamp: parseInt(storedEntryTimestamp),
+        shardId: parseInt(storedShardId),
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + JWT_EXPIRY_SECONDS,
+      };
+
+      const newToken = await signJwt(newJwtPayload, SIGNING_SECRET_ID);
+
+      return {
+        statusCode: 200,
+        headers: baseHeaders,
+        body: JSON.stringify({
+          token: newToken,
+          entryTimestamp: parseInt(storedEntryTimestamp),
+          shardId: parseInt(storedShardId),
+          queuePosition: null,
+        }),
+      };
+    }
+
     // Get precise timestamp via system clock
     const entryTimestamp = Date.now();
     const nowSeconds = Math.floor(entryTimestamp / 1000);
@@ -66,6 +110,8 @@ export async function handler(
                 PK: { S: trackingPk },
                 SK: { S: 'PENDING' },
                 FanId: { S: fanId },
+                EntryTimestamp: { N: String(entryTimestamp) },
+                ShardId: { N: String(shardId) },
                 ExpiresAt: { N: String(queueTtl) },
               },
               ConditionExpression: 'attribute_not_exists(PK)',
