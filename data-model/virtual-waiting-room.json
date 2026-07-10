@@ -46,7 +46,9 @@
             "SK": { "S": "METADATA" },
             "AdmittedUntilTimestamp": { "N": "1719997202000" },
             "ActivePurchaserCount": { "N": "950" },
-            "TieBreakerThreshold": { "N": "100" }
+            "TieBreakerThreshold": { "N": "100" },
+            "PartialAdmittedBucket": { "N": "0" },
+            "AdmittedFromBucket": { "N": "0" }
           },
           {
             "PK": { "S": "EVENT#match2026#SHARD#845" },
@@ -73,17 +75,17 @@
             "ExpiresAt": { "N": "1720083605" }
           },
           {
-            "PK": { "S": "EVENT#match2026#DENSITY" },
+            "PK": { "S": "EVENT#match2026#DENSITY#SHARD#3" },
             "SK": { "S": "BUCKET#1719997199" },
             "Count": { "N": "14820" }
           },
           {
-            "PK": { "S": "EVENT#match2026#DENSITY" },
+            "PK": { "S": "EVENT#match2026#DENSITY#SHARD#6" },
             "SK": { "S": "BUCKET#1719997200" },
             "Count": { "N": "15000" }
           },
           {
-            "PK": { "S": "EVENT#match2026#DENSITY" },
+            "PK": { "S": "EVENT#match2026#DENSITY#SHARD#7" },
             "SK": { "S": "BUCKET#1719997201" },
             "Count": { "N": "15110" }
           },
@@ -131,6 +133,8 @@
             "PK": { "S": "EVENT#match2026#FAN#fan_11223" },
             "SK": { "S": "PENDING" },
             "FanId": { "S": "fan_11223" },
+            "EntryTimestamp": { "N": "1719997205124" },
+            "ShardId": { "N": "845" },
             "ExpiresAt": { "N": "1720083605" }
           }
         ]
