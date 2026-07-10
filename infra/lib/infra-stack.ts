@@ -13,6 +13,7 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import * as path from 'node:path';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 
 export class InfraStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -102,10 +103,17 @@ export class InfraStack extends cdk.Stack {
 
     table.grantWriteData(aggregatorFn);
 
+    const aggregatorDlq = new sqs.Queue(this, 'AggregatorDlq', {
+      retentionPeriod: cdk.Duration.days(14),
+      visibilityTimeout: cdk.Duration.seconds(120),
+    });
+    aggregatorDlq.grantSendMessages(aggregatorFn);
+
     aggregatorFn.addEventSource(new lambdaEventSources.DynamoEventSource(table, {
       startingPosition: lambda.StartingPosition.LATEST,
       batchSize: 100,
       retryAttempts: 3,
+      onFailure: new lambdaEventSources.SqsDlq(aggregatorDlq),
     }));
 
     // --- Status Polling Lambda ---
@@ -124,6 +132,7 @@ export class InfraStack extends cdk.Stack {
       environment: {
         TABLE_NAME: table.tableName,
         SIGNING_SECRET_ID: signingSecret.secretName,
+        COMPLETION_RATE_FACTOR: '0.01',
       },
       bundling: {
         target: 'es2022',

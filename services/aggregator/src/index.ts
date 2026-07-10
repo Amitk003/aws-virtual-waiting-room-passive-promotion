@@ -19,10 +19,11 @@ function flush(
   const promises: Promise<any>[] = [];
 
   for (const entry of buffer) {
+    const shard = parseInt(entry.bucketTs) % 10;
     promises.push(ddb.send(new UpdateItemCommand({
       TableName: TABLE_NAME,
       Key: {
-        PK: { S: `EVENT#${entry.eventId}#DENSITY` },
+        PK: { S: `EVENT#${entry.eventId}#DENSITY#SHARD#${shard}` },
         SK: { S: `BUCKET#${entry.bucketTs}` },
       },
       UpdateExpression: 'ADD #count :inc',
@@ -95,6 +96,11 @@ export const handler: DynamoDBStreamHandler = async (event: DynamoDBStreamEvent)
 
   const promises = flush(buffer, ttlCounters);
   if (promises.length > 0) {
-    await Promise.all(promises);
+    const results = await Promise.allSettled(promises);
+    for (let i = 0; i < results.length; i++) {
+      if (results[i].status === 'rejected') {
+        console.error('Aggregator write failed:', (results[i] as PromiseRejectedResult).reason);
+      }
+    }
   }
 };

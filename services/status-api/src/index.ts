@@ -36,28 +36,38 @@ function extractBearerToken(event: APIGatewayProxyEventV2): string | null {
 }
 
 async function queryDensity(eventId: string): Promise<DensityBucket[]> {
-  const result = await ddb.send(new QueryCommand({
-    TableName: TABLE_NAME,
-    KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
-    ExpressionAttributeValues: {
-      ':pk': { S: `EVENT#${eventId}#DENSITY` },
-      ':prefix': { S: 'BUCKET#' },
-    },
-    ProjectionExpression: 'SK, #count',
-    ExpressionAttributeNames: { '#count': 'Count' },
-  }));
+  // Density map is sharded across 10 sub-partitions to spread write load.
+  // Read all 10 shards in parallel and merge.
+  const densityPks = Array.from({ length: 10 }, (_, i) => `EVENT#${eventId}#DENSITY#SHARD#${i}`);
 
-  const buckets: DensityBucket[] = [];
-  for (const item of result.Items || []) {
-    const sk = item.SK?.S || '';
-    const count = Number(item.Count?.N || 0);
-    const bucketTs = parseInt(sk.replace('BUCKET#', ''));
-    if (!isNaN(bucketTs)) {
-      buckets.push({ bucketTs, count });
+  const results = await Promise.all(densityPks.map(pk =>
+    ddb.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
+      ExpressionAttributeValues: {
+        ':pk': { S: pk },
+        ':prefix': { S: 'BUCKET#' },
+      },
+      ProjectionExpression: 'SK, #count',
+      ExpressionAttributeNames: { '#count': 'Count' },
+    }))
+  ));
+
+  const bucketMap = new Map<number, number>();
+  for (const result of results) {
+    for (const item of result.Items || []) {
+      const sk = item.SK?.S || '';
+      const count = Number(item.Count?.N || 0);
+      const bucketTs = parseInt(sk.replace('BUCKET#', ''));
+      if (!isNaN(bucketTs)) {
+        bucketMap.set(bucketTs, (bucketMap.get(bucketTs) || 0) + count);
+      }
     }
   }
 
-  return buckets.sort((a, b) => a.bucketTs - b.bucketTs);
+  return Array.from(bucketMap.entries())
+    .map(([bucketTs, count]) => ({ bucketTs, count }))
+    .sort((a, b) => a.bucketTs - b.bucketTs);
 }
 
 async function loadState(eventId: string): Promise<CachedState> {

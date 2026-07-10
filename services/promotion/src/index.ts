@@ -23,28 +23,37 @@ async function loadDensity(eventId: string): Promise<CachedDensity['buckets']> {
     return densityCache.buckets;
   }
 
-  const result = await ddb.send(new QueryCommand({
-    TableName: TABLE_NAME,
-    KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
-    ExpressionAttributeValues: {
-      ':pk': { S: `EVENT#${eventId}#DENSITY` },
-      ':prefix': { S: 'BUCKET#' },
-    },
-    ProjectionExpression: 'SK, #count',
-    ExpressionAttributeNames: { '#count': 'Count' },
-  }));
+  // Density map is sharded across 10 sub-partitions. Read all in parallel.
+  const densityPks = Array.from({ length: 10 }, (_, i) => `EVENT#${eventId}#DENSITY#SHARD#${i}`);
 
-  const buckets: Array<{ bucketTs: number; count: number }> = [];
-  for (const item of result.Items || []) {
-    const sk = item.SK?.S || '';
-    const count = Number(item.Count?.N || 0);
-    const bucketTs = parseInt(sk.replace('BUCKET#', ''));
-    if (!isNaN(bucketTs)) {
-      buckets.push({ bucketTs, count });
+  const results = await Promise.all(densityPks.map(pk =>
+    ddb.send(new QueryCommand({
+      TableName: TABLE_NAME,
+      KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
+      ExpressionAttributeValues: {
+        ':pk': { S: pk },
+        ':prefix': { S: 'BUCKET#' },
+      },
+      ProjectionExpression: 'SK, #count',
+      ExpressionAttributeNames: { '#count': 'Count' },
+    }))
+  ));
+
+  const bucketMap = new Map<number, number>();
+  for (const result of results) {
+    for (const item of result.Items || []) {
+      const sk = item.SK?.S || '';
+      const count = Number(item.Count?.N || 0);
+      const bucketTs = parseInt(sk.replace('BUCKET#', ''));
+      if (!isNaN(bucketTs)) {
+        bucketMap.set(bucketTs, (bucketMap.get(bucketTs) || 0) + count);
+      }
     }
   }
 
-  buckets.sort((a, b) => a.bucketTs - b.bucketTs);
+  const buckets = Array.from(bucketMap.entries())
+    .map(([bucketTs, count]) => ({ bucketTs, count }))
+    .sort((a, b) => a.bucketTs - b.bucketTs);
 
   densityCache = { timestamp: now, buckets };
   return buckets;
