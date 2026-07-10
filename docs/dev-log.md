@@ -146,3 +146,90 @@ Files changed:
 - `infra/lib/infra-stack.ts` - Major cleanup
 - `docs/iac-setup.md` - Updated to reflect removal of IAM roles
 - `docs/dev-log.md` - This entry
+
+---
+
+## Branch: feature/phase-3-ingestion-tier
+
+### 2026-07-10 - Ingestion Lambda and API Gateway setup
+
+Commands ran:
+- `git checkout main && git checkout -b feature/phase-3-ingestion-tier` - Create branch
+- `New-Item services/ingestion/src, services/ingestion/test` - Create Lambda project dirs
+- `npm install` (in services/ingestion/) - Install SDK deps
+- `npm install --save-dev esbuild` (in infra/) - Install bundler for NodejsFunction
+- `npx tsc --noEmit` - Verified TypeScript compilation
+- `npx cdk synth` - Generated CloudFormation (Lambda + API Gateway bundled successfully)
+
+Packages installed:
+- In services/ingestion/: @aws-sdk/client-dynamodb, @aws-sdk/client-kms, @types/aws-lambda, jest, typescript, etc.
+- In infra/: esbuild (dev dependency for Lambda bundling)
+
+Files created:
+- `services/ingestion/package.json` - Node.js project config
+- `services/ingestion/tsconfig.json` - TypeScript config
+- `services/ingestion/src/index.ts` - Lambda handler (event parsing, sharding, DynamoDB write, JWT sign)
+- `services/ingestion/src/jwt.ts` - JWT signing utility using KMS Sign API (ES256)
+- `services/ingestion/src/shard.ts` - Shard ID generator (1-2000)
+- `services/ingestion/test/ingestion.test.ts` - Shard distribution unit tests
+- `docs/ingestion-service.md` - Ingestion service documentation
+
+Files modified:
+- `infra/lib/infra-stack.ts` - Added NodejsFunction for ingestion Lambda, HttpApi with route, IAM grants
+
+Stack additions:
+- Lambda: IngestionHandler (Node.js 22.x, ARM64, 512MB, 10s timeout)
+- API Gateway: HTTP API with POST /api/v1/event/{eventId}/join
+- IAM: Auto-created role with DynamoDB write + KMS sign permissions
+- CORS: Enabled for content-type and authorization headers
+- Provisioned Concurrency: Placeholder (commented out, to be enabled before event)
+Notes:
+
+- Lambda uses KMS Sign API directly (for production at 1M scale, switch to local key caching from Secrets Manager)
+- Table name and key ID passed via environment variables
+- projectRoot set to repo root for cross-directory Lambda bundling
+- API Gateway uses HTTP API (v2) for lower latency and cost
+
+### 2026-07-10 - Bug fixes: DER signature, KMS hot path, double-join check
+
+Commands ran:
+- `npm install` (in services/ingestion/) - Added jose and @aws-sdk/client-secrets-manager
+- `npx cdk synth` - Verified CloudFormation (bundled jose into Lambda, 39.7kb)
+
+Files changed:
+- `services/ingestion/src/jwt.ts` - Complete rewrite
+- `services/ingestion/src/index.ts` - Added tracking item write
+- `services/ingestion/package.json` - Added jose and secrets-manager deps
+- `infra/lib/infra-stack.ts` - Added Secrets Manager secret, changed KMS grant to GetPublicKey
+- `scripts/generate-key.js` - New file for key generation
+- `docs/ingestion-service.md` - Updated docs
+
+Bug fixes applied:
+
+1. DER vs P1363 signature format: Removed raw KMS Sign call. KMS returned ASN.1 DER but JWT/ES256 requires IEEE P1363 (raw R||S). Switched to local signing with `jose` library which handles P1363 correctly.
+
+2. KMS hot path: Removed `kms:Sign` from Lambda. JWTs are now signed locally using a cached ECC P-256 private key loaded from Secrets Manager. KMS is only used for `kms:GetPublicKey` (authorizer needs the public key). This eliminates KMS API throttling at 1M requests/sec.
+
+3. Double-join check: Added tracking item write with PK = `EVENT#<eventId>#FAN#<fanId>` and condition `attribute_not_exists(PK)`. If the condition fails, returns 409. The tracking item has ExpiresAt TTL so orphaned items auto-clean if Lambda crashes between the two writes.
+
+### 2026-07-10 - Removed KMS entirely (unrelated key pair bug)
+
+Commands ran:
+- Removed `@aws-sdk/client-kms` from services/ingestion/package.json
+- `npx cdk synth` - Verified CloudFormation output
+
+Files changed:
+- `infra/lib/infra-stack.ts` - Removed KMS key, alias, grants, env var; removed KmsKeyId output
+- `services/ingestion/src/jwt.ts` - Removed KMS client, GetPublicKeyCommand; kid is now fixed string `vwr-v1`
+- `services/ingestion/src/index.ts` - Removed KMS_KEY_ID env var
+- `services/ingestion/package.json` - Removed @aws-sdk/client-kms
+- `scripts/generate-key.js` - Already stored both privateKey and publicKey (no change needed)
+- `docs/iac-setup.md` - Replaced KMS doc with Secrets Manager doc
+- `docs/ingestion-service.md` - Updated JWT signing section
+- `docs/dev-log.md` - This entry
+
+Reason:
+- There were two unrelated ECC P-256 key pairs: KMS key (for GetPublicKey) and Secrets Manager key (for local signing)
+- The `kid` header derived from the KMS key ID required verifiers to reference KMS, but the actual signing key was the Secrets Manager one
+- Removing KMS entirely means one key pair stored in Secrets Manager, used for both signing (private key) and verification (public key)
+- Eliminates the risk of key mismatch and removes a dependency that was only used for deriving a key ID
