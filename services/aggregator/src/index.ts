@@ -3,7 +3,6 @@ import { DynamoDBStreamEvent, DynamoDBStreamHandler } from 'aws-lambda';
 
 const ddb = new DynamoDBClient();
 const TABLE_NAME = process.env.TABLE_NAME!;
-const DENSITY_SHARD_COUNT = 20;
 
 function extractEventId(pk: string): string | null {
   const parts = pk.split('#');
@@ -20,11 +19,10 @@ function flush(
   const promises: Promise<any>[] = [];
 
   for (const entry of buffer) {
-    const shardId = Math.floor(Math.random() * DENSITY_SHARD_COUNT) + 1;
     promises.push(ddb.send(new UpdateItemCommand({
       TableName: TABLE_NAME,
       Key: {
-        PK: { S: `EVENT#${entry.eventId}#DENSITY#SHARD#${shardId}` },
+        PK: { S: `EVENT#${entry.eventId}#DENSITY` },
         SK: { S: `BUCKET#${entry.bucketTs}` },
       },
       UpdateExpression: 'ADD #count :inc',

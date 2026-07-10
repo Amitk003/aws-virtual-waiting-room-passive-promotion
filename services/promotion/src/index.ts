@@ -4,7 +4,6 @@ const ddb = new DynamoDBClient();
 const TABLE_NAME = process.env.TABLE_NAME!;
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const MAX_SLOTS = 1000;
-const DENSITY_SHARD_COUNT = 20;
 
 // In-memory cache: density map is read once per 2s and reused across
 // rapid 1s Lambda invocations.
@@ -24,36 +23,28 @@ async function loadDensity(eventId: string): Promise<CachedDensity['buckets']> {
     return densityCache.buckets;
   }
 
-  const results = await Promise.all(
-    Array.from({ length: DENSITY_SHARD_COUNT }, (_, i) =>
-      ddb.send(new QueryCommand({
-        TableName: TABLE_NAME,
-        KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
-        ExpressionAttributeValues: {
-          ':pk': { S: `EVENT#${eventId}#DENSITY#SHARD#${i + 1}` },
-          ':prefix': { S: 'BUCKET#' },
-        },
-        ProjectionExpression: 'SK, #count',
-        ExpressionAttributeNames: { '#count': 'Count' },
-      }))
-    )
-  );
+  const result = await ddb.send(new QueryCommand({
+    TableName: TABLE_NAME,
+    KeyConditionExpression: 'PK = :pk AND begins_with(SK, :prefix)',
+    ExpressionAttributeValues: {
+      ':pk': { S: `EVENT#${eventId}#DENSITY` },
+      ':prefix': { S: 'BUCKET#' },
+    },
+    ProjectionExpression: 'SK, #count',
+    ExpressionAttributeNames: { '#count': 'Count' },
+  }));
 
-  const merged = new Map<number, number>();
-  for (const result of results) {
-    for (const item of result.Items || []) {
-      const sk = item.SK?.S || '';
-      const count = Number(item.Count?.N || 0);
-      const bucketTs = parseInt(sk.replace('BUCKET#', ''));
-      if (!isNaN(bucketTs)) {
-        merged.set(bucketTs, (merged.get(bucketTs) || 0) + count);
-      }
+  const buckets: Array<{ bucketTs: number; count: number }> = [];
+  for (const item of result.Items || []) {
+    const sk = item.SK?.S || '';
+    const count = Number(item.Count?.N || 0);
+    const bucketTs = parseInt(sk.replace('BUCKET#', ''));
+    if (!isNaN(bucketTs)) {
+      buckets.push({ bucketTs, count });
     }
   }
 
-  const buckets = Array.from(merged.entries())
-    .map(([bucketTs, count]) => ({ bucketTs, count }))
-    .sort((a, b) => a.bucketTs - b.bucketTs);
+  buckets.sort((a, b) => a.bucketTs - b.bucketTs);
 
   densityCache = { timestamp: now, buckets };
   return buckets;
