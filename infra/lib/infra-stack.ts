@@ -266,6 +266,20 @@ export class InfraStack extends cdk.Stack {
       ),
     });
 
+    // --- CloudFront Function: Token Presence Check ---
+    // Runs at the edge on every request. Rejects requests to protected
+    // paths (status, claim, release) that lack a Bearer token. This is a
+    // cheap format check only — actual JWT signature verification runs in
+    // the downstream Lambda. It filters out 99% of unauthenticated traffic
+    // before it reaches API Gateway.
+
+    const tokenCheckFn = new cloudfront.Function(this, 'TokenCheck', {
+      functionName: 'vwr-token-format-check',
+      code: cloudfront.FunctionCode.fromFile({
+        filePath: path.join(__dirname, '..', '..', 'edge', 'check-auth.js'),
+      }),
+    });
+
     // --- CloudFront CDN ---
     // Caches status responses at the edge for reduced latency.
     // Cache key includes the Authorization header (per-user caching).
@@ -292,6 +306,10 @@ export class InfraStack extends cdk.Stack {
         cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
         allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
         viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        functionAssociations: [{
+          function: tokenCheckFn,
+          eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+        }],
       },
       additionalBehaviors: {
         '/api/v1/event/*/status': {
@@ -302,6 +320,10 @@ export class InfraStack extends cdk.Stack {
           cachePolicy,
           allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD,
           viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          functionAssociations: [{
+            function: tokenCheckFn,
+            eventType: cloudfront.FunctionEventType.VIEWER_REQUEST,
+          }],
         },
       },
       defaultRootObject: '',
