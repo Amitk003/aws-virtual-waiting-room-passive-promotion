@@ -20,7 +20,7 @@ function flush(
   const promises: Promise<any>[] = [];
 
   for (const entry of buffer) {
-    const shardId = (parseInt(entry.bucketTs) % DENSITY_SHARD_COUNT) + 1;
+    const shardId = Math.floor(Math.random() * DENSITY_SHARD_COUNT) + 1;
     promises.push(ddb.send(new UpdateItemCommand({
       TableName: TABLE_NAME,
       Key: {
