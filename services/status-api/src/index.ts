@@ -8,10 +8,24 @@ const SIGNING_SECRET_ID = process.env.SIGNING_SECRET_ID!;
 const EVENT_ID = process.env.EVENT_ID || 'default-event';
 const DENSITY_SHARD_COUNT = 20;
 
+// Global-scope in-memory cache: the density map and GlobalState are
+// identical for all users in the same event. This avoids hammering
+// DynamoDB with 20 queries per request.
+const CACHE_TTL_MS = 2000;
+
+interface CachedState {
+  timestamp: number;
+  admittedUntilTimestamp: number;
+  activePurchaserCount: number;
+  densityBuckets: DensityBucket[];
+}
+
 interface DensityBucket {
   bucketTs: number;
   count: number;
 }
+
+const stateCache = new Map<string, CachedState>();
 
 function extractBearerToken(event: APIGatewayProxyEventV2): string | null {
   const auth = event.headers?.authorization || event.headers?.Authorization || '';
@@ -50,7 +64,6 @@ async function queryDensityShards(eventId: string): Promise<DensityBucket[]> {
     }
   }
 
-  // Merge counts from all shards for the same bucket
   const merged = new Map<number, number>();
   for (const b of buckets) {
     merged.set(b.bucketTs, (merged.get(b.bucketTs) || 0) + b.count);
@@ -59,6 +72,37 @@ async function queryDensityShards(eventId: string): Promise<DensityBucket[]> {
   return Array.from(merged.entries())
     .map(([bucketTs, count]) => ({ bucketTs, count }))
     .sort((a, b) => a.bucketTs - b.bucketTs);
+}
+
+async function loadState(eventId: string): Promise<CachedState> {
+  const cached = stateCache.get(eventId);
+  const now = Date.now();
+
+  if (cached && now - cached.timestamp < CACHE_TTL_MS) {
+    return cached;
+  }
+
+  const [globalState, densityBuckets] = await Promise.all([
+    ddb.send(new GetItemCommand({
+      TableName: TABLE_NAME,
+      Key: {
+        PK: { S: `EVENT#${eventId}#METADATA` },
+        SK: { S: 'METADATA' },
+      },
+      ProjectionExpression: 'AdmittedUntilTimestamp, ActivePurchaserCount',
+    })),
+    queryDensityShards(eventId),
+  ]);
+
+  const state: CachedState = {
+    timestamp: now,
+    admittedUntilTimestamp: Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0),
+    activePurchaserCount: Number(globalState.Item?.ActivePurchaserCount?.N || 0),
+    densityBuckets,
+  };
+
+  stateCache.set(eventId, state);
+  return state;
 }
 
 function calculateQueuePosition(
@@ -82,7 +126,6 @@ function estimateWaitSeconds(
   activePurchaserCount: number
 ): number | null {
   if (queuePosition <= 0) return 0;
-  // Assume ~60% of active purchasers complete per minute
   const completionRatePerSec = Math.max(activePurchaserCount * 0.01, 1);
   return Math.ceil(queuePosition / completionRatePerSec);
 }
@@ -112,20 +155,8 @@ export async function handler(
     const jwtPayload: JwtPayload = await verifyJwt(token, SIGNING_SECRET_ID);
     const eventId = extractEventId(event.rawPath) || EVENT_ID;
 
-    // Read GlobalState
-    const globalState = await ddb.send(new GetItemCommand({
-      TableName: TABLE_NAME,
-      Key: {
-        PK: { S: `EVENT#${eventId}#METADATA` },
-        SK: { S: 'METADATA' },
-      },
-      ProjectionExpression: 'AdmittedUntilTimestamp, ActivePurchaserCount, TotalQueued',
-    }));
-
-    const admittedUntilTimestamp = Number(globalState.Item?.AdmittedUntilTimestamp?.N || 0);
-    const activePurchaserCount = Number(globalState.Item?.ActivePurchaserCount?.N || 0);
-
-    const isAdmitted = jwtPayload.entryTimestamp <= admittedUntilTimestamp;
+    const state = await loadState(eventId);
+    const isAdmitted = jwtPayload.entryTimestamp <= state.admittedUntilTimestamp;
 
     if (isAdmitted) {
       return {
@@ -135,16 +166,14 @@ export async function handler(
           admitted: true,
           fanId: jwtPayload.fanId,
           entryTimestamp: jwtPayload.entryTimestamp,
-          admittedUntilTimestamp,
-          activePurchaserCount,
+          admittedUntilTimestamp: state.admittedUntilTimestamp,
+          activePurchaserCount: state.activePurchaserCount,
         }),
       };
     }
 
-    // Query density map across all shards
-    const densityBuckets = await queryDensityShards(eventId);
-    const queuePosition = calculateQueuePosition(densityBuckets, jwtPayload.entryTimestamp);
-    const estimatedWaitSeconds = estimateWaitSeconds(queuePosition, activePurchaserCount);
+    const queuePosition = calculateQueuePosition(state.densityBuckets, jwtPayload.entryTimestamp);
+    const estimatedWaitSeconds = estimateWaitSeconds(queuePosition, state.activePurchaserCount);
 
     return {
       statusCode: 200,
@@ -153,10 +182,10 @@ export async function handler(
         admitted: false,
         fanId: jwtPayload.fanId,
         entryTimestamp: jwtPayload.entryTimestamp,
-        admittedUntilTimestamp,
+        admittedUntilTimestamp: state.admittedUntilTimestamp,
         queuePosition,
         estimatedWaitSeconds,
-        activePurchaserCount,
+        activePurchaserCount: state.activePurchaserCount,
       }),
     };
   } catch (error: any) {
