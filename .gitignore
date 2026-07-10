@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.cdk.out/
+cdk.out/
+*.js.map
+*.d.ts
+.env
+.env.local
+*.log
+.aws-sam/
+.DS_Store
+Thumbs.db
+coverage/
+.nyc_output/
+temp/
+tmp/
