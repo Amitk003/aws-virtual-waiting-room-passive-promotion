@@ -1,4 +1,4 @@
-import { DynamoDBClient, GetItemCommand, DeleteItemCommand, UpdateItemCommand, TransactWriteItemsCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient, GetItemCommand, DeleteItemCommand, PutItemCommand, UpdateItemCommand } from '@aws-sdk/client-dynamodb';
 import { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
 import { verifyJwt } from './jwt.js';
 
@@ -110,61 +110,31 @@ export async function handler(
         };
       }
 
-      // Create session and increment counter atomically via transaction
+      // Create session item. The admission watermark gates who can claim, so
+      // no counter check is needed here. The Promotion Engine continuously
+      // reconciles slot capacity via the GSI count and advances the watermark
+      // accordingly. Short-lived overshoot (TOCTOU) is bounded and corrected
+      // by the 5-min Reconciliation Lambda.
       try {
-        await ddb.send(new TransactWriteItemsCommand({
-          TransactItems: [
-            {
-              Put: {
-                TableName: TABLE_NAME,
-                Item: {
-                  PK: { S: sessionPk },
-                  SK: { S: 'SESSION' },
-                  GSIPK: { S: `EVENT#${eventId}#SESSION_META` },
-                  FanId: { S: fanId },
-                  StartedAt: { N: String(nowSeconds) },
-                  ExpiresAt: { N: String(expirySeconds) },
-                },
-                ConditionExpression: 'attribute_not_exists(PK)',
-              },
-            },
-            {
-              Update: {
-                TableName: TABLE_NAME,
-                Key: {
-                  PK: { S: `EVENT#${eventId}#METADATA` },
-                  SK: { S: 'METADATA' },
-                },
-                UpdateExpression: 'ADD ActivePurchaserCount :one',
-                ConditionExpression: 'ActivePurchaserCount < :max OR attribute_not_exists(ActivePurchaserCount)',
-                ExpressionAttributeValues: {
-                  ':one': { N: '1' },
-                  ':max': { N: '1000' },
-                },
-              },
-            },
-          ],
+        await ddb.send(new PutItemCommand({
+          TableName: TABLE_NAME,
+          Item: {
+            PK: { S: sessionPk },
+            SK: { S: 'SESSION' },
+            GSIPK: { S: `EVENT#${eventId}#SESSION_META` },
+            FanId: { S: fanId },
+            StartedAt: { N: String(nowSeconds) },
+            ExpiresAt: { N: String(expirySeconds) },
+          },
+          ConditionExpression: 'attribute_not_exists(PK)',
         }));
       } catch (err: any) {
-        if (err.name === 'TransactionCanceledException') {
-          // Check which item caused the cancellation
-          const reasons = err.CancellationReasons || [];
-          // Index 1 is the counter update — if it failed, slots are full
-          if (reasons[1]?.Code === 'ConditionalCheckFailed') {
-            return {
-              statusCode: 429,
-              headers: baseHeaders,
-              body: JSON.stringify({ error: 'All checkout slots are full. Try again shortly.' }),
-            };
-          }
-          // Index 0 is the session create — if it failed, session already exists
-          if (reasons[0]?.Code === 'ConditionalCheckFailed') {
-            return {
-              statusCode: 409,
-              headers: baseHeaders,
-              body: JSON.stringify({ error: 'Session already exists' }),
-            };
-          }
+        if (err.name === 'ConditionalCheckFailedException') {
+          return {
+            statusCode: 409,
+            headers: baseHeaders,
+            body: JSON.stringify({ error: 'Session already exists' }),
+          };
         }
         throw err;
       }
@@ -244,14 +214,6 @@ export async function handler(
         statusCode: 401,
         headers: baseHeaders,
         body: JSON.stringify({ error: 'Invalid or expired token' }),
-      };
-    }
-
-    if (error.name === 'ConditionalCheckFailedException') {
-      return {
-        statusCode: 409,
-        headers: baseHeaders,
-        body: JSON.stringify({ error: 'Session already exists' }),
       };
     }
 
